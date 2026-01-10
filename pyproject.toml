@@ -37,6 +37,7 @@ dependencies = [
     "transformers>=4.36.0",
     "accelerate>=0.20.0",
     "datasets>=2.14.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +53,7 @@ dev = [
 tournament-validator = "neurons.validator:main"
 tournament-screener = "neurons.screener:main"
 tournament-miner = "neurons.miner:main"
+tplr = "tournament.tui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
