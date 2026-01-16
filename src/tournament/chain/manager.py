@@ -92,22 +92,43 @@ class ChainManager:
         return self._metagraph
 
     def get_uid_for_hotkey(self, hotkey: str) -> int | None:
-        """Get the UID for a hotkey, or None if not registered."""
-        if self.metagraph is None:
-            logger.warning("Metagraph not synced - cannot get UID")
-            return None
+        """Get the UID for a hotkey, or None if not registered.
+        
+        Falls back to direct chain query if metagraph is unavailable.
+        """
+        # Try metagraph first (faster, cached)
+        if self.metagraph is not None:
+            try:
+                idx = self.metagraph.hotkeys.index(hotkey)
+                return int(self.metagraph.uids[idx])
+            except ValueError:
+                return None
+        
+        # Fallback: query chain directly (works when metagraph API unavailable)
         try:
-            idx = self.metagraph.hotkeys.index(hotkey)
-            return int(self.metagraph.uids[idx])
-        except ValueError:
+            uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+                hotkey_ss58=hotkey,
+                netuid=self.netuid,
+            )
+            if uid is not None:
+                logger.info(f"Got UID {uid} for hotkey via direct chain query")
+            return uid
+        except Exception as e:
+            logger.warning(f"Failed to get UID from chain: {e}")
             return None
 
     def is_registered(self, hotkey: str) -> bool:
-        """Check if a hotkey is registered on the subnet."""
-        if self.metagraph is None:
-            logger.warning("Metagraph not synced - cannot check registration")
-            return False
-        return hotkey in self.metagraph.hotkeys
+        """Check if a hotkey is registered on the subnet.
+        
+        Falls back to direct chain query if metagraph is unavailable.
+        """
+        # Try metagraph first
+        if self.metagraph is not None:
+            return hotkey in self.metagraph.hotkeys
+        
+        # Fallback: check via get_uid (if we get a UID, it's registered)
+        uid = self.get_uid_for_hotkey(hotkey)
+        return uid is not None
 
     async def get_current_block(self) -> int:
         """Get the current block number."""
