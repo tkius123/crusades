@@ -458,9 +458,18 @@ async def create_submission(
             if temp_file.exists():
                 temp_file.unlink()
     
+    # ANTI-COPYING: Check for exact duplicate code (same hash)
+    all_submissions = await db.get_all_submissions()
+    for existing in all_submissions:
+        if existing.code_hash == request.code_hash:
+            logger.warning(f"🚫 Duplicate code detected: hash {request.code_hash[:16]}... already exists")
+            raise HTTPException(
+                status_code=409,
+                detail=f"This exact code has already been submitted (submission {existing.submission_id[:8]}...)"
+            )
+    
     # ANTI-COPYING: Check submission cooldown (prevent rapid copying)
-    recent_submissions = await db.get_all_submissions()
-    miner_submissions = [s for s in recent_submissions if s.miner_uid == request.miner_uid]
+    miner_submissions = [s for s in all_submissions if s.miner_uid == request.miner_uid]
     
     if miner_submissions:
         latest = max(miner_submissions, key=lambda s: s.created_at)
@@ -474,6 +483,37 @@ async def create_submission(
                 status_code=429,
                 detail=f"Cooldown period active. Please wait {minutes_remaining} minutes before next submission."
             )
+    
+    # ANTI-COPYING: Check similarity against miner's own previous submissions
+    # This prevents trivial modifications to bypass duplicate detection
+    for sub in miner_submissions:
+        r2 = get_r2_storage()
+        temp_file = Path(tempfile.mktemp(suffix=".py"))
+        try:
+            success = await r2.download_code(sub.bucket_path, str(temp_file))
+            if success and temp_file.exists():
+                existing_code = temp_file.read_text()
+                similarity = calculate_similarity(request.code, existing_code)
+                
+                if similarity.overall_score > 0.9:  # 90% similar to own previous code
+                    logger.warning(
+                        f"🚫 Code too similar to own previous submission: "
+                        f"{similarity.overall_score:.0%} similar to {sub.submission_id[:8]}..."
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Code is {similarity.overall_score:.0%} similar to your previous submission. "
+                            f"Please make significant changes before resubmitting."
+                        )
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.debug(f"Could not compare with own submission {sub.submission_id[:8]}...: {e}")
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
     
     # Basic submission validation
     if len(request.code) < 100:

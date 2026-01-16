@@ -1,372 +1,214 @@
 # ⚡ Templar Tournament
 
-Compete to write the fastest PyTorch training code. Winner-takes-all: Highest TPS → 100% of subnet emissions.
+**Compete to write the fastest PyTorch training code. Winner takes all!**
 
-**Live Dashboard:** Check with your validator for their dashboard URL
-
----
-
-## 🎯 Overview
-
-**The Challenge:** Optimize training to achieve maximum tokens-per-second (TPS)
-
-- **Task**: Run training steps on Qwen2.5-3B
-- **Metric**: TPS = total_tokens / wall_time
-- **Reward**: #1 on leaderboard gets 100% emissions
-- **Cost**: 0.1 TAO per submission
-- **Evaluation**: 5 runs with different seeds, median score used (fair!)
-
----
-
-## 🚀 For Miners
-
-### Setup
-```bash
-# 1. Clone and install
-git clone https://github.com/tplr-ai/templar-tournament.git
-cd templar-tournament
-uv sync
-
-# 2. Download model and data
-uv run python scripts/setup_miner.py
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           TOURNAMENT FLOW                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   MINER                          VALIDATOR                    BLOCKCHAIN     │
+│                                                                              │
+│   ┌──────────┐                                                               │
+│   │ train.py │                                                               │
+│   └────┬─────┘                                                               │
+│        │                                                                     │
+│        ▼                                                                     │
+│   ┌──────────┐     pay 0.1 TAO      ┌──────────────┐                        │
+│   │  Submit  │ ──────────────────▶  │   Receive    │                        │
+│   │  + Sign  │                      │   & Verify   │                        │
+│   └────┬─────┘                      └──────┬───────┘                        │
+│        │                                   │                                 │
+│        │       code + signature            │                                 │
+│        └──────────────────────────────────▶│                                 │
+│                                            │                                 │
+│                                   ┌────────▼────────┐                        │
+│                                   │   EVALUATION    │                        │
+│                                   │   (5x runs)     │                        │
+│                                   │                 │                        │
+│                                   │  Run 1: 1250 ──┐│                        │
+│                                   │  Run 2: 1180   ││                        │
+│                                   │  Run 3: 1220 ◄─┤│ median                 │
+│                                   │  Run 4: 1195   ││                        │
+│                                   │  Run 5: 1240 ──┘│                        │
+│                                   └────────┬────────┘                        │
+│                                            │                                 │
+│                                            ▼                                 │
+│                                   ┌─────────────────┐    set weights        │
+│   ┌──────────┐                    │   LEADERBOARD   │ ─────────────────────▶│
+│   │  Check   │ ◄──────────────────│   #1 = Winner   │                       │
+│   │  Score   │                    └─────────────────┘                       │
+│   └──────────┘                                                              │
+│                                                                              │
+│        ▼                                               ┌──────────────────┐  │
+│   ┌──────────┐                                         │   EMISSIONS      │  │
+│   │  WINNER  │ ◄───────────────────────────────────────│   95% validator  │  │
+│   │  gets 5% │                                         │    5% winner     │  │
+│   └──────────┘                                         └──────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Test Locally
+---
+
+## Quick Start
+
+### Miners
+
 ```bash
-# Test your code before submitting (no cost!)
+# 1. Setup
+git clone https://github.com/tplr-ai/templar-tournament.git && cd templar-tournament
+uv sync && uv run python scripts/setup_miner.py
+
+# 2. Test locally (free!)
 uv run python -m local_test train.py --steps 5
 
-# This validates:
-# - Code structure (inner_steps function)
-# - Forbidden imports
-# - Actual execution with TPS measurement
-```
-
-### Submit to Validator
-```bash
-# One-time: Register on subnet
-btcli subnet register --netuid <NETUID> --wallet.name mywallet --wallet.hotkey myhotkey
-
-# Submit code (costs 0.1 TAO)
+# 3. Submit (costs 0.1 TAO)
 uv run python -m neurons.miner train.py \
-    --wallet.name mywallet \
-    --wallet.hotkey myhotkey \
-    --payment-recipient <VALIDATOR_HOTKEY_ADDRESS> \
+    --wallet.name mywallet --wallet.hotkey myhotkey \
+    --payment-recipient <VALIDATOR_HOTKEY> \
     --validator-api http://<VALIDATOR_IP>:8000
 ```
 
-**What happens:**
-1. Posts code hash + structural fingerprint to blockchain (timestamp proof)
-2. Pays 0.1 TAO anti-spam fee
-3. Uploads code to validator with cryptographic signature
-4. Gets evaluated 5 times (different seeds)
-5. Median TPS appears on leaderboard
+### Validators
 
-**Security:** Your code is protected by blockchain timestamp. Even malicious validators can't steal it - you have cryptographic proof you created it first!
-
-### Check Results
-
-Visit the validator's dashboard or use API:
 ```bash
-curl http://<VALIDATOR_IP>:8000/leaderboard
-curl http://<VALIDATOR_IP>:8000/api/submissions/<SUBMISSION_ID>
-curl http://<VALIDATOR_IP>:8000/api/submissions/<SUBMISSION_ID>/evaluations
+# 1. Setup
+git clone https://github.com/tplr-ai/templar-tournament.git && cd templar-tournament
+uv sync && uv run python scripts/setup_validator.py
+
+# 2. Build sandbox
+cd src/tournament/sandbox && docker build -t tournament-sandbox:latest . && cd ../../..
+
+# 3. Run (two terminals)
+uv run python -m api.app                    # API + Dashboard
+uv run python -m neurons.validator          # Evaluation loop
 ```
 
 ---
 
-## 🛠️ For Validators
+## How It Works
 
-### Setup
+| Step | What Happens |
+|------|-------------|
+| 1. **Pay** | Miner pays 0.1 TAO to validator (anti-spam) |
+| 2. **Submit** | Code uploaded with cryptographic signature |
+| 3. **Evaluate** | Sandbox runs code 5 times with different seeds |
+| 4. **Score** | Median TPS = final score (protects against outliers) |
+| 5. **Rank** | Highest TPS → #1 on leaderboard |
+| 6. **Reward** | Winner receives 5% of emissions, validator 95% |
 
-```bash
-# 1. Install
-git clone https://github.com/tplr-ai/templar-tournament.git
-cd templar-tournament
-uv sync
+**TPS = Tokens Per Second = (batch_size × seq_length × steps) / time**
 
-# 2. Download model and test data
-uv run python scripts/setup_validator.py
+---
 
-# 3. Configure environment
-cat > .env << 'EOF'
-# Wallet
-TOURNAMENT_WALLET_NAME=validator
-TOURNAMENT_WALLET_HOTKEY=validator_hotkey
-TOURNAMENT_SUBTENSOR_NETWORK=finney
+## Code Requirements
 
-# R2 Storage (Cloudflare R2 or S3-compatible)
-TOURNAMENT_R2_ACCOUNT_ID=your_account_id
-TOURNAMENT_R2_BUCKET_NAME=tournament-submissions
-TOURNAMENT_R2_ACCESS_KEY_ID=your_access_key
-TOURNAMENT_R2_SECRET_ACCESS_KEY=your_secret_key
-EOF
+Your `train.py` must implement:
 
-# 4. Build Docker sandbox (includes PyTorch, flash-attn, torchtitan)
-cd src/tournament/sandbox
-docker build -t tournament-sandbox:latest .
-cd ../../..
-
-# 5. Register on blockchain
-btcli subnet register --netuid <NETUID> --wallet.name validator --wallet.hotkey validator_hotkey
-btcli stake add --amount 1000 --wallet.name validator --wallet.hotkey validator_hotkey
+```python
+def inner_steps(model, data_iterator, optimizer, num_steps, device):
+    """Run training steps.
+    
+    Returns: InnerStepsResult(final_logits, total_tokens, final_loss)
+    """
+    total_tokens = 0
+    for step in range(num_steps):
+        batch = next(data_iterator).to(device)  # Shape: (8, 1024)
+        
+        # Your optimized training here
+        # - Process input_ids[:, :-1] → predict labels[:, 1:]
+        # - Use autocast for bfloat16
+        # - backward() + optimizer.step()
+        
+        total_tokens += batch.numel()
+    
+    return InnerStepsResult(final_logits, total_tokens, final_loss)
 ```
 
-### Configure (hparams/hparams.json)
+**Rules:**
+- ✅ Output logits must match reference within 2%
+- ✅ Process correct token count
+- ✅ Complete within 10 minutes
+- ❌ No network access, subprocess, or filesystem writes
+
+**Sandbox includes:** PyTorch + CUDA, Transformers, flash-attn, torchtitan
+
+---
+
+## Anti-Copying Protection
+
+| Protection | How It Works |
+|-----------|--------------|
+| **Duplicate Detection** | Same code hash → rejected |
+| **Similarity Check** | >90% similar to existing → rejected |
+| **Cooldown** | 5 minute wait between submissions |
+| **Hidden Until Done** | Code not visible until evaluated |
+
+---
+
+## Dashboard
+
+**Web:** `http://<VALIDATOR_IP>:8000/`
+
+**TUI:** `uv run python -m tournament.tui`
+
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate/scroll |
+| `h/l` | Switch panels |
+| `Enter` | View details |
+| `c` | Toggle code |
+| `q` | Quit |
+
+---
+
+## API Endpoints
+
+```bash
+GET  /leaderboard                    # Rankings
+GET  /api/stats/overview             # Network stats
+GET  /api/stats/recent               # Recent submissions
+GET  /api/submissions/{id}           # Submission details
+GET  /api/submissions/{id}/code      # View code (after eval)
+```
+
+---
+
+## Configuration (hparams.json)
 
 ```json
 {
     "netuid": 2,
     "evaluation_runs": 5,
-    "eval_steps": 5,
-    "eval_timeout": 600,
     "benchmark_model_name": "Qwen/Qwen2.5-3B",
     "benchmark_batch_size": 8,
     "benchmark_sequence_length": 1024,
     "submission_cost_rao": 100000000,
-    "verification": {
-        "output_vector_tolerance": 0.02
-    },
-    "anti_copying": {
-        "submission_cooldown_minutes": 5
-    }
+    "burn_rate": 0.95,
+    "burn_uid": 0
 }
 ```
 
-### Run Validator
-
-**Terminal 1 - API Server:**
-```bash
-uv run python -m api.app
-# Web Dashboard: http://your-ip:8000/
-```
-
-**Terminal 2 - Validator:**
-```bash
-uv run python -m neurons.validator \
-    --wallet.name validator \
-    --wallet.hotkey validator_hotkey
-```
-
-**Terminal 3 (Optional) - TUI Dashboard:**
-```bash
-uv run python -m tournament.tui
-# Terminal dashboard with vim-style navigation
-```
-
-**Announce to miners:**
-- API URL: `http://your-ip:8000`
-- Payment address: Your validator hotkey SS58 address
+| Field | Default | Description |
+|-------|---------|-------------|
+| `evaluation_runs` | 5 | Runs per submission |
+| `benchmark_batch_size` | 8 | Tokens per batch |
+| `submission_cost_rao` | 1e8 | 0.1 TAO in RAO |
+| `burn_rate` | 0.95 | % to validator |
+| `verification.output_vector_tolerance` | 0.02 | 2% max diff |
 
 ---
 
-## 📋 Required Code Format
+## Troubleshooting
 
-Your `train.py` must have an `inner_steps` function:
-
-```python
-from dataclasses import dataclass
-import torch
-import torch.nn.functional as F
-
-@dataclass
-class InnerStepsResult:
-    final_logits: torch.Tensor  # (batch, seq_len-1, vocab_size)
-    total_tokens: int           # batch_size * seq_length * num_steps
-    final_loss: float
-
-def inner_steps(model, data_iterator, optimizer, num_steps, device):
-    """Your optimized training loop.
-    
-    Args:
-        model: HuggingFace model (Qwen2.5-3B) - DO NOT modify architecture
-        data_iterator: Yields batches of shape (8, 1024)
-        optimizer: AdamW optimizer
-        num_steps: Number of training steps
-        device: torch.device (cuda)
-    
-    Returns:
-        InnerStepsResult with final_logits, total_tokens, final_loss
-    """
-    total_tokens = 0
-    
-    for step in range(num_steps):
-        batch = next(data_iterator).to(device)
-        
-        # Standard causal LM training
-        input_ids = batch[:, :-1]
-        labels = batch[:, 1:]
-        
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs = model(input_ids)
-            logits = outputs.logits
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                labels.reshape(-1)
-            )
-        
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        
-        total_tokens += batch.numel()
-    
-    return InnerStepsResult(
-        final_logits=logits.float(),
-        total_tokens=total_tokens,
-        final_loss=loss.item()
-    )
-```
-
-**Requirements:**
-- ✅ Process correct number of tokens (batch_size × seq_length × num_steps)
-- ✅ Output logits within 2% of reference (aggregate difference)
-- ✅ Complete within timeout (default: 10 minutes)
-- ✅ Use only allowed imports
-
-**Forbidden:**
-- ❌ Network access (`socket`, `requests`, `urllib`)
-- ❌ Filesystem writes outside /tmp
-- ❌ Subprocess/shell execution
-- ❌ Model architecture changes
-
-**Available in Sandbox:**
-- PyTorch with CUDA 12.8
-- Transformers, Accelerate
-- flash-attn (flash attention)
-- torchtitan (PyTorch native training)
-
----
-
-## 🏆 How Scoring Works
-
-```
-# Each submission is evaluated 5 times with different random seeds
-Run 1: seed=12345 → 4,302 TPS
-Run 2: seed=67890 → 4,289 TPS  
-Run 3: seed=54321 → 4,315 TPS  ← median
-Run 4: seed=98765 → 4,298 TPS
-Run 5: seed=11111 → 4,305 TPS
-
-Final Score: 4,302 TPS (median protects against GPU hiccups)
-
-# TPS calculation
-TPS = total_tokens / wall_time_seconds
-```
-
-**Why median?**
-- Protects against random GPU slowdowns
-- Fair: one bad run doesn't tank your score
-- Example: [1200, 1250, 50] → median=1200 (not avg=833)
-
-**Winner gets 100% of emissions!**
-
-Weights update every 10 minutes. Hold #1 → Earn TAO continuously.
-
----
-
-## 📊 Dashboard
-
-### Web Dashboard
-Visit validator's web dashboard at `http://<VALIDATOR_IP>:8000/` to see:
-- 📈 Network stats (submissions, top TPS, active miners)
-- ⚡ Validator status (live evaluations)
-- 📊 TPS history chart
-- 🏆 Leaderboard with rankings
-- 💻 Code viewer (submissions visible after evaluation)
-- 🔍 Detailed evaluation results per run
-
-### Terminal Dashboard (TUI)
-For validators/miners who prefer terminal:
-
-```bash
-# View live dashboard with real data
-uv run python -m tournament.tui
-
-# Options
-uv run python -m tournament.tui --url http://localhost:8000  # Custom API
-uv run python -m tournament.tui --demo                        # Demo mode
-uv run python -m tournament.tui --refresh 60                  # Refresh interval
-```
-
-**Controls:**
-| Key | Action |
-|-----|--------|
-| `j/k` | Navigate up/down |
-| `h/l` | Switch panels |
-| `Enter` | View submission details |
-| `j/k` (in code view) | Scroll code |
-| `c` | Toggle code view |
-| `b` | Back to dashboard |
-| `r` | Refresh |
-| `q` | Quit |
-
----
-
-## 🔒 Security Model
-
-**Multi-Layer Protection:**
-
-| Layer | Protection |
-|-------|------------|
-| PKE Authentication | Sign submissions with wallet - can't impersonate |
-| Blockchain Timestamp | Hash + fingerprint posted to chain FIRST - proves ownership |
-| Structural Fingerprint | Detects modified copies across validators |
-| Code Hidden | Only visible after evaluation completes |
-| Submission Cooldown | 5 minute wait between submissions |
-| Isolated Sandbox | Docker with no network, read-only filesystem |
-
-**Anti-Copying Flow:**
-1. Miner posts code hash + structural fingerprint to blockchain
-2. Block number proves "Miner X had this code at time T"
-3. If someone copies: original has earlier block number = wins
-4. Structural fingerprint catches modified copies (renamed variables, etc.)
-
-**Verification:**
-- Same random seed for reference and miner code
-- Model state reset between evaluations
-- Output logits must match within 2% aggregate difference
-
----
-
-## 🔧 Configuration Reference
-
-### hparams.json
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `netuid` | Subnet ID | 2 |
-| `evaluation_runs` | Runs per submission (median taken) | 5 |
-| `eval_steps` | Training steps per run | 5 |
-| `eval_timeout` | Max seconds per evaluation | 600 |
-| `benchmark_model_name` | HuggingFace model | Qwen/Qwen2.5-3B |
-| `benchmark_batch_size` | Batch size | 8 |
-| `benchmark_sequence_length` | Sequence length | 1024 |
-| `submission_cost_rao` | Cost in RAO (1 TAO = 1e9 RAO) | 100000000 |
-| `verification.output_vector_tolerance` | Max aggregate logit diff | 0.02 (2%) |
-| `anti_copying.submission_cooldown_minutes` | Wait between submissions | 5 |
-| `sandbox.memory_limit` | Container memory | 32g |
-| `sandbox.gpu_count` | GPUs per evaluation | 1 |
-
----
-
-## 🐛 Troubleshooting
-
-**"Output logits don't match"**
-- Your code produces different results than reference
-- Check: using correct loss function, autocast, optimizer settings
-
-**"Timeout exceeded"**
-- Code took too long
-- Optimize your training loop
-
-**"Forbidden import"**
-- Using disallowed module (os, subprocess, socket, etc.)
-- Check imports in your train.py
-
-**"Not registered"**
-- Wallet not registered on subnet
-- Run: `btcli subnet register --netuid <NETUID> ...`
+| Error | Fix |
+|-------|-----|
+| "Output logits don't match" | Check loss function, autocast settings |
+| "Timeout exceeded" | Optimize your loop |
+| "Forbidden import" | Remove os/socket/subprocess |
+| "Too similar" | Make significant code changes |
+| "Cooldown active" | Wait 5 minutes |
 
 ---
 
