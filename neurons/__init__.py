@@ -1,1 +1,1 @@
-"""Neuron implementations for templar-tournament."""
+"""Neuron implementations for templar-crusades."""

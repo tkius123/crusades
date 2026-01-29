@@ -7,14 +7,14 @@ from abc import ABC, abstractmethod
 
 import bittensor as bt
 
-from tournament.chain.manager import ChainManager
-from tournament.config import get_config, get_hparams
+from crusades.chain.manager import ChainManager
+from crusades.config import get_config, get_hparams
 
 logger = logging.getLogger(__name__)
 
 
 class BaseNode(ABC):
-    """Base class for tournament nodes (validators).
+    """Base class for crusades nodes (validators).
 
     Provides:
     - Signal handling for graceful shutdown
@@ -24,9 +24,11 @@ class BaseNode(ABC):
     def __init__(
         self,
         wallet: bt.wallet | None = None,
+        skip_blockchain_check: bool = False,
     ):
         self.config = get_config()
         self.hparams = get_hparams()
+        self.skip_blockchain_check = skip_blockchain_check
 
         # Initialize wallet
         if wallet is None:
@@ -37,8 +39,11 @@ class BaseNode(ABC):
         else:
             self.wallet = wallet
 
-        # Initialize chain manager
-        self.chain = ChainManager(wallet=self.wallet)
+        # Initialize chain manager (skip if in test mode)
+        if not skip_blockchain_check:
+            self.chain = ChainManager(wallet=self.wallet)
+        else:
+            self.chain = None
 
         # State
         self.running: bool = False
@@ -67,10 +72,15 @@ class BaseNode(ABC):
     @property
     def uid(self) -> int | None:
         """Get the node's UID on the subnet."""
+        if self.chain is None:
+            return 1  # Mock UID for test mode
         return self.chain.get_uid_for_hotkey(self.hotkey)
 
     async def sync(self) -> None:
         """Sync metagraph."""
+        if self.chain is None:
+            logger.debug("Skipping metagraph sync (test mode)")
+            return
         await self.chain.sync_metagraph()
         logger.debug("Metagraph synced")
 
@@ -86,8 +96,8 @@ class BaseNode(ABC):
 
         # Initial sync
         # Skip blockchain checks if in test mode
-        skip_check = getattr(self, 'skip_blockchain_check', False)
-        
+        skip_check = getattr(self, "skip_blockchain_check", False)
+
         if not skip_check:
             await self.sync()
 

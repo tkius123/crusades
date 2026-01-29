@@ -1,0 +1,23 @@
+[Unit]
+Description=Templar Crusades API Server
+Documentation=https://github.com/one-covenant/templar-crusades
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+WorkingDirectory=REPLACE_WORKDIR
+Environment="PATH=REPLACE_WORKDIR/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="CRUSADES_DB_PATH=REPLACE_WORKDIR/crusades.db"
+# Optional: Add API key for authentication
+# Environment="DASHBOARD_API_KEY=your-secret-key"
+ExecStart=REPLACE_WORKDIR/.venv/bin/crusades-api --port 8080
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+

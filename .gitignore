@@ -61,5 +61,12 @@ benchmark/data/test.pt
 
 # Local development files
 local_storage/
-tournament.db
-tournament_local.db
+crusades.db
+crusades_local.db
+
+# Local testing files
+.local_commitments/
+benchmark/
+
+# Test scripts (optional)
+scripts/test_chi_flow.py

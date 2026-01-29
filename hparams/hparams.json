@@ -3,43 +3,44 @@
     "burn_rate": 0.95,
     "burn_uid": 1,
 
-    "num_evals_per_submission": 1,
     "evaluation_runs": 5,
     "eval_steps": 5,
     "eval_timeout": 600,
 
     "benchmark_model_name": "Qwen/Qwen2.5-3B",
-    "benchmark_model_revision": "main",
     "benchmark_dataset_name": "HuggingFaceFW/fineweb",
     "benchmark_dataset_split": "train",
-    "benchmark_train_size": 100000,
-    "benchmark_test_size": 100000,
+    "benchmark_data_samples": 10000,
     "benchmark_master_seed": 42,
     "benchmark_sequence_length": 1024,
-    "benchmark_batch_size": 8,
+    "benchmark_batch_size": 4,
 
-    "set_weights_interval_seconds": 600,
-    
-    "submission_cost_rao": 100000000,
+    "set_weights_interval_blocks": 100,
 
-    "anti_copying": {
-        "submission_cooldown_minutes": 5,
-        "hide_pending_submissions": true
+    "reveal_blocks": 100,
+    "min_blocks_between_commits": 300,
+    "block_time": 12,
+
+    "docker": {
+        "gpu_devices": "0,1",
+        "memory_limit": "64g",
+        "shm_size": "16g"
     },
 
-    "sandbox": {
-        "memory_limit": "32g",
-        "cpu_count": 4,
+    "basilica": {
+        "image": "ghcr.io/one-covenant/templar-eval:latest",
+        "ttl_seconds": 3600,
         "gpu_count": 1,
-        "pids_limit": 256
+        "gpu_models": ["A100"],
+        "min_gpu_memory_gb": 40,
+        "cpu": "4",
+        "memory": "32Gi"
     },
 
     "verification": {
-        "output_vector_tolerance": 0.02,
+        "output_vector_tolerance": 0.05,
+        "loss_ratio_min": 0.8,
+        "loss_ratio_max": 1.2,
         "deterministic_mode": true
-    },
-
-    "storage": {
-        "database_url": "sqlite+aiosqlite:///tournament.db"
     }
 }

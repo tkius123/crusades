@@ -1,215 +1,236 @@
-# ⚡ Templar Tournament
+# Templar Crusades
 
-**Compete to write the fastest PyTorch training code. Winner takes all!**
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           TOURNAMENT FLOW                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   MINER                          VALIDATOR                    BLOCKCHAIN     │
-│                                                                              │
-│   ┌──────────┐                                                               │
-│   │ train.py │                                                               │
-│   └────┬─────┘                                                               │
-│        │                                                                     │
-│        ▼                                                                     │
-│   ┌──────────┐     pay 0.1 TAO      ┌──────────────┐                        │
-│   │  Submit  │ ──────────────────▶  │   Receive    │                        │
-│   │  + Sign  │                      │   & Verify   │                        │
-│   └────┬─────┘                      └──────┬───────┘                        │
-│        │                                   │                                 │
-│        │       code + signature            │                                 │
-│        └──────────────────────────────────▶│                                 │
-│                                            │                                 │
-│                                   ┌────────▼────────┐                        │
-│                                   │   EVALUATION    │                        │
-│                                   │   (5x runs)     │                        │
-│                                   │                 │                        │
-│                                   │  Run 1: 1250 ──┐│                        │
-│                                   │  Run 2: 1180   ││                        │
-│                                   │  Run 3: 1220 ◄─┤│ median                 │
-│                                   │  Run 4: 1195   ││                        │
-│                                   │  Run 5: 1240 ──┘│                        │
-│                                   └────────┬────────┘                        │
-│                                            │                                 │
-│                                            ▼                                 │
-│                                   ┌─────────────────┐    set weights        │
-│   ┌──────────┐                    │   LEADERBOARD   │ ─────────────────────▶│
-│   │  Check   │ ◄──────────────────│   #1 = Winner   │                       │
-│   │  Score   │                    └─────────────────┘                       │
-│   └──────────┘                                                              │
-│                                                                              │
-│        ▼                                               ┌──────────────────┐  │
-│   ┌──────────┐                                         │   EMISSIONS      │  │
-│   │  WINNER  │ ◄───────────────────────────────────────│   95% validator  │  │
-│   │  gets 5% │                                         │    5% winner     │  │
-│   └──────────┘                                         └──────────────────┘  │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Quick Start
-
-### Miners
-
-```bash
-# 1. Setup
-git clone https://github.com/tplr-ai/templar-tournament.git && cd templar-tournament
-uv sync && uv run python scripts/setup_miner.py
-
-# 2. Test locally (free!)
-uv run python -m local_test train.py --steps 5
-
-# 3. Submit (costs 0.1 TAO)
-uv run python -m neurons.miner train.py \
-    --wallet.name mywallet --wallet.hotkey myhotkey \
-    --payment-recipient <VALIDATOR_HOTKEY> \
-    --validator-api http://<VALIDATOR_IP>:8000
-```
-
-### Validators
-
-```bash
-# 1. Setup
-git clone https://github.com/tplr-ai/templar-tournament.git && cd templar-tournament
-uv sync && uv run python scripts/setup_validator.py
-
-# 2. Build sandbox
-cd src/tournament/sandbox && docker build -t tournament-sandbox:latest . && cd ../../..
-
-# 3. Run (two terminals)
-uv run python -m api.app                    # API + Dashboard
-uv run python -m neurons.validator          # Evaluation loop
-```
-
----
+**TPS Crusades on Bittensor** - Miners compete to optimize training code for maximum Tokens Per Second.
 
 ## How It Works
 
-| Step | What Happens |
-|------|-------------|
-| 1. **Pay** | Miner pays 0.1 TAO to validator (anti-spam) |
-| 2. **Submit** | Code uploaded with cryptographic signature |
-| 3. **Evaluate** | Sandbox runs code 5 times with different seeds |
-| 4. **Score** | Median TPS = final score (protects against outliers) |
-| 5. **Rank** | Highest TPS → #1 on leaderboard |
-| 6. **Reward** | Winner receives 5% of emissions, validator 95% |
-
-**TPS = Tokens Per Second = (batch_size × seq_length × steps) / time**
-
----
-
-## Code Requirements
-
-Your `train.py` must implement:
-
-```python
-def inner_steps(model, data_iterator, optimizer, num_steps, device):
-    """Run training steps.
-    
-    Returns: InnerStepsResult(final_logits, total_tokens, final_loss)
-    """
-    total_tokens = 0
-    for step in range(num_steps):
-        batch = next(data_iterator).to(device)  # Shape: (8, 1024)
-        
-        # Your optimized training here
-        # - Process input_ids[:, :-1] → predict labels[:, 1:]
-        # - Use autocast for bfloat16
-        # - backward() + optimizer.step()
-        
-        total_tokens += batch.numel()
-    
-    return InnerStepsResult(final_logits, total_tokens, final_loss)
+```
+┌───────────────────────────────────────────────────────────────────────────────── ┐
+│                              Crusades FLOW                                       │
+│                                                                                  │
+│   MINER                        BLOCKCHAIN                      VALIDATOR         │
+│     │                                                              │             │
+│     │  1. Host train.py at URL                                     │             │
+│     │     (Gist, Pastebin, etc)                                    │             │
+│     │                                                              │             │
+│     ├──▶ 2. Submit URL ─────────▶ set_reveal_commitment            │             │
+│     │                             (timelock encrypted)             │             │
+│     │                                    │                         │             │
+│     │                                    │ (wait reveal_blocks)    │             │
+│     │                                    ▼                         │             │
+│     │                              3. Decrypted ◀───────────────── ┤ Read        │
+│     │                                                              │             │
+│     │                                                     4. Download code       │
+│     │                                                        from URL            │
+│     │                                                              │             │
+│     │                                                     5. Runs in Container   │
+│     │                                                        (X eval runs)       │
+│     │                                                              │             │
+│     │                                                     6. Calculate TPS       │
+│     │                                                        (median score)      │
+│     │                                                              │             │
+│     │                                                     7. Set weights         │
+│                                                                                  │
+└───────────────────────────────────────────────────────────────────────────────── ┘
 ```
 
-**Rules:**
-- ✅ Output logits must match reference within 2%
-- ✅ Process correct token count
-- ✅ Complete within 10 minutes
-- ❌ No network access, subprocess, or filesystem writes
+## Quick Start
 
-**Sandbox includes:** PyTorch + CUDA, Transformers, flash-attn, torchtitan
-
----
-
-## Anti-Copying Protection
-
-| Protection | How It Works |
-|-----------|--------------|
-| **Duplicate Detection** | Same code hash → rejected |
-| **Similarity Check** | >90% similar to existing → rejected |
-| **Cooldown** | 5 minute wait between submissions |
-| **Hidden Until Done** | Code not visible until evaluated |
-
----
-
-## Dashboard
-
-**Web:** `http://<VALIDATOR_IP>:8000/`
-
-**TUI:** `uv run python -m tournament.tui`
-
-| Key | Action |
-|-----|--------|
-| `j/k` | Navigate/scroll |
-| `h/l` | Switch panels |
-| `Enter` | View details |
-| `c` | Toggle code |
-| `q` | Quit |
-
----
-
-## API Endpoints
+### Prerequisites
 
 ```bash
-GET  /leaderboard                    # Rankings
-GET  /api/stats/overview             # Network stats
-GET  /api/stats/recent               # Recent submissions
-GET  /api/submissions/{id}           # Submission details
-GET  /api/submissions/{id}/code      # View code (after eval)
+# Clone and setup
+git clone https://github.com/one-covenant/crusades
+cd crusades
+uv sync
+
+# Create .env (for HuggingFace access)
+echo "HF_TOKEN=hf_your_token" > .env
 ```
 
 ---
 
-## Configuration (hparams.json)
+## For Miners
 
-```json
-{
-    "netuid": 2,
-    "evaluation_runs": 5,
-    "benchmark_model_name": "Qwen/Qwen2.5-3B",
-    "benchmark_batch_size": 8,
-    "benchmark_sequence_length": 1024,
-    "submission_cost_rao": 100000000,
-    "burn_rate": 0.95,
-    "burn_uid": 0
-}
+### 1. Setup & Test Locally
+
+```bash
+# Download model & data for local testing
+uv run local_test/setup_benchmark.py
+
+# Test your train.py locally (performance test)
+uv run local_test/train.py
+
+# Verify your submission to avoid potential failures during validator checks
+uv run local_test/verify.py
 ```
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `evaluation_runs` | 5 | Runs per submission |
-| `benchmark_batch_size` | 8 | Tokens per batch |
-| `submission_cost_rao` | 1e8 | 0.1 TAO in RAO |
-| `burn_rate` | 0.95 | % to validator |
-| `verification.output_vector_tolerance` | 0.02 | 2% max diff |
+### 2. Host Your Code
+
+Host your `train.py` at any URL that returns raw code:
+- **GitHub Gist** (recommended - use secret gist for privacy)
+- **Raw GitHub file** (use raw.githubusercontent.com)
+- **Pastebin** or any paste service
+- Any HTTP/HTTPS URL
+
+### 3. Submit to Crusades
+
+```bash
+
+# Submit to mainnet
+uv run -m neurons.miner submit "https://gist.github.com/user/gist_id" \
+    --wallet.name your_wallet \
+    --wallet.hotkey your_hotkey \
+    --network finney
+
+# Submit to localnet (testing)
+uv run -m neurons.miner submit "https://gist.github.com/user/gist_id" \
+    --wallet.name your_wallet \
+    --wallet.hotkey your_hotkey \
+    --network local
+```
+
+**Parameters**: `--wallet.name`, `--wallet.hotkey`, `--network` (finney/test/local)
 
 ---
 
-## Troubleshooting
+## For Validators
 
-| Error | Fix |
-|-------|-----|
-| "Output logits don't match" | Check loss function, autocast settings |
-| "Timeout exceeded" | Optimize your loop |
-| "Forbidden import" | Remove os/socket/subprocess |
-| "Too similar" | Make significant code changes |
-| "Cooldown active" | Wait 5 minutes |
+See [docs/Validator.md](docs/Validator.md) for detailed validator setup.
 
 ---
 
-**Ready to compete? Optimize your code and claim #1! ⚡**
+## train.py Requirements
+
+Your `train.py` must implement the `inner_steps` function. Here's the basic implementation:
+
+```python
+from dataclasses import dataclass
+import torch
+import torch.nn.functional as F
+
+@dataclass
+class InnerStepsResult:
+    final_logits: torch.Tensor  # Output logits from last forward pass
+    total_tokens: int           # Total tokens processed across all steps
+    final_loss: float           # Loss value from last training step
+
+def inner_steps(model, data_iterator, optimizer, num_steps, device):
+    """
+    Run training steps and return results.
+    
+    Args:
+        model: Pre-loaded model (already on device, in train mode)
+        data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
+        optimizer: Pre-configured optimizer
+        num_steps: Number of training steps to run
+        device: Target device (cuda or cpu)
+    
+    Returns:
+        InnerStepsResult with outputs for verification
+    """
+    total_tokens = 0
+    final_logits = None
+    final_loss = 0.0
+    
+    for step in range(num_steps):
+        # Get batch
+        batch = next(data_iterator)
+        batch = batch.to(device)
+        
+        # Prepare inputs and labels
+        input_ids = batch[:, :-1]
+        labels = batch[:, 1:]
+        
+        # Forward pass
+        outputs = model(input_ids)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        
+        # Compute loss
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+            ignore_index=-100,
+        )
+        
+        # Backward pass
+        loss.backward()
+        
+        # Update weights
+        optimizer.step()
+        optimizer.zero_grad()
+        
+        # Track metrics
+        total_tokens += batch.numel()
+        final_logits = logits.detach().float()
+        final_loss = loss.item()
+    
+    return InnerStepsResult(
+        final_logits=final_logits,
+        total_tokens=total_tokens,
+        final_loss=final_loss,
+    )
+```
+
+This is a basic implementation - miners should optimize it for better performance.
+
+---
+
+## Configuration
+
+Key settings in `hparams/hparams.json`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `netuid` | 3 | Subnet ID |
+| `evaluation_runs` | 5 | Runs per submission (median taken) |
+| `eval_steps` | 5 | Training steps per evaluation |
+| `benchmark_model_name` | Qwen/Qwen2.5-3B | Model for evaluation |
+| `benchmark_batch_size` | 4 | Batch size for evaluation |
+
+---
+
+## Project Structure
+
+```
+templar-crusades/
+├── neurons/
+│   ├── miner.py              # Miner CLI (submit, validate, status)
+│   └── validator.py          # Validator main loop
+├── local_test/
+│   ├── setup_benchmark.py    # Download model & data
+│   └── train.py              # Template to optimize
+├── environments/templar/
+│   ├── Dockerfile            # Evaluation container
+│   └── env.py                # Evaluation environment
+├── hparams/
+│   └── hparams.json          # Configuration
+├── docs/
+│   └── Validator.md          # Validator documentation
+└── src/crusades/
+    ├── chain/                # Blockchain interactions
+    ├── affinetes/            # Docker/Basilica evaluation
+    ├── storage/              # Database models
+    └── tui/                  # Terminal dashboard
+```
+
+---
+
+## TUI Dashboard
+
+Monitor crusades activity in real-time with the terminal dashboard.
+
+### (Connect to Public API)
+
+```bash
+# Connect to the official Crusades API
+uv run -m crusades.tui --url http://154.54.100.65:8080
+```
+
+### Features
+
+- Leaderboard with TPS scores
+- Recent submissions and their status
+- TPS history chart
+- Validator status
+- View submission code (after evaluation)

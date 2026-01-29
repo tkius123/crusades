@@ -3,16 +3,16 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "templar-tournament"
+name = "templar-crusades"
 version = "0.1.0"
-description = "Bittensor subnet for training code efficiency competition"
+description = "Bittensor subnet for training code efficiency crusades"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 authors = [
     { name = "Templar Team" }
 ]
-keywords = ["bittensor", "machine-learning", "optimization", "competition"]
+keywords = ["bittensor", "machine-learning", "optimization", "crusades"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "bittensor>=7.0.0",
+    "bittensor>=9.10.1,<9.11.0",  # Pin to 9.10.x like templar for localnet compatibility
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "sqlalchemy>=2.0.0",
@@ -38,6 +38,9 @@ dependencies = [
     "accelerate>=0.20.0",
     "datasets>=2.14.0",
     "rich>=13.0.0",
+    "substrateinterface>=1.0.0",
+    "substrate-interface>=1.8.1",
+    "basilica-sdk>=0.13.0",  # Basilica cloud GPU SDK
 ]
 
 [project.optional-dependencies]
@@ -50,17 +53,17 @@ dev = [
 ]
 
 [project.scripts]
-tournament-validator = "neurons.validator:main"
-tournament-screener = "neurons.screener:main"
-tournament-miner = "neurons.miner:main"
-tplr = "tournament.tui.app:main"
+crusades-validator = "neurons.validator:main"
+crusades-miner = "neurons.miner:main"
+crusades-api = "crusades.api.server:main"
+tplr = "crusades.tui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["tournament*", "neurons*"]
+include = ["crusades*", "neurons*"]
 
 [tool.setuptools.package-dir]
-tournament = "src/tournament"
+crusades = "src/crusades"
 
 [tool.ruff]
 line-length = 100
@@ -68,7 +71,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+ignore = ["E501", "N812"]  # N812: Allow `import torch.nn.functional as F` (PyTorch convention)
 
 [tool.mypy]
 python_version = "3.12"

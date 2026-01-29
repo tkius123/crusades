@@ -1,324 +1,387 @@
-"""Miner CLI for submitting training code to the tournament.
+"""Miner CLI for Templar Crusades.
 
-SECURITY NOTE: Miners submit code to validator API, NOT directly to storage.
-Validators handle storage privately to prevent cheating.
+URL-Based Architecture:
+1. Host your train.py code at any URL (Gist, Pastebin, raw GitHub, etc.)
+2. Run: miner submit <code_url>
+3. The URL is timelock encrypted on blockchain
+4. After reveal, validators fetch and evaluate your code
+
+The URL acts as a secret - only those who know it can access.
+Timelock encryption keeps it hidden until reveal_blocks pass.
 """
 
 import argparse
-import asyncio
-import hashlib
+import json
 import sys
-import time
-from pathlib import Path
+import urllib.error
+import urllib.request
 
 import bittensor as bt
-import httpx
 
-from tournament.anti_copying import compute_fingerprint
-from tournament.chain.manager import ChainManager
-from tournament.config import get_config, get_hparams
-from tournament.payment.manager import PaymentManager
-from tournament.pipeline.validator import CodeValidator
+from crusades.config import HParams
 
 
-async def submit_code(
-    code_path: Path,
-    wallet: bt.wallet,
-    skip_validation: bool = False,
-    skip_payment: bool = False,
-    payment_recipient: str | None = None,
-    validator_api_url: str = "http://localhost:8000",
-) -> str | None:
-    """Submit training code to validator via API.
-    
-    SECURITY: Code is sent to validator's API endpoint, not directly to storage.
-    This prevents miners from accessing or manipulating the storage layer.
+def validate_code_url(url: str) -> tuple[bool, str]:
+    """Validate that the URL points to a SINGLE valid train.py file.
+
+    Accepts ANY URL that returns valid Python code with inner_steps function.
+    Examples: GitHub Gist, raw GitHub, Pastebin, any HTTP/HTTPS URL.
+
+    IMPORTANT: Must be a single file URL, not a folder/directory or repo.
 
     Args:
-        code_path: Path to train.py file
-        wallet: Bittensor wallet for signing
-        skip_validation: Skip local code validation
-        skip_payment: Skip payment (for testing only)
-        payment_recipient: Validator's payment address
-        validator_api_url: Validator API endpoint
+        url: The URL to validate
 
     Returns:
-        Submission ID if successful, None otherwise
+        Tuple of (is_valid, error_message_or_validated_url)
     """
-    # Read code
-    if not code_path.exists():
-        print(f"Error: File not found: {code_path}")
-        return None
+    if not url:
+        return False, "URL cannot be empty"
 
-    code = code_path.read_text()
+    # Must be HTTP or HTTPS
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return False, "URL must start with http:// or https://"
 
-    # Validate code locally
-    if not skip_validation:
-        validator = CodeValidator()
-        result = validator.validate(code)
-        if not result.valid:
-            print("Code validation failed:")
-            for error in result.errors:
-                print(f"  - {error}")
-            return None
-        print("Code validation passed")
+    # Block obvious directory/folder URLs
+    blocked_patterns = [
+        "/tree/",  # GitHub repo tree
+        "/blob/",  # GitHub blob without raw - redirect to raw
+        "?tab=",  # GitHub tab navigation
+        "/commits",  # GitHub commits page
+        "/pulls",  # GitHub PRs
+        "/issues",  # GitHub issues
+        "/actions",  # GitHub actions
+    ]
+    for pattern in blocked_patterns:
+        if pattern in url.lower():
+            return False, "URL appears to be a folder/page, not a single file. Use raw file URL."
 
-    # Calculate code hash
-    code_hash = hashlib.sha256(code.encode()).hexdigest()
-    print(f"Code hash: {code_hash}")
+    # For GitHub blob URLs, suggest raw format
+    if "github.com" in url and "/blob/" in url:
+        return False, "Use raw.githubusercontent.com URL instead of github.com/blob/"
 
-    # Initialize chain manager
-    hotkey = wallet.hotkey.ss58_address
-    
-    if not skip_payment:
-        # Production: Verify registration on-chain
-        chain = ChainManager(wallet=wallet)
-        await chain.sync_metagraph()
+    # For GitHub Gist URLs, convert to raw format
+    final_url = url
+    if "gist.github.com" in url.lower() and "/raw" not in url.lower():
+        final_url = url.replace("gist.github.com", "gist.githubusercontent.com")
+        if not final_url.endswith("/raw"):
+            final_url = final_url.rstrip("/") + "/raw"
 
-        if not chain.is_registered(hotkey):
-            print(f"Error: Hotkey {hotkey} is not registered on subnet {chain.netuid}")
-            return None
-
-        uid = chain.get_uid_for_hotkey(hotkey)
-        print(f"Miner UID: {uid}")
-    else:
-        # Testing mode: Use mock values
-        print("⚠️  Skipping blockchain verification (testing mode)")
-        uid = 1  # Mock UID for testing
-        print(f"Mock Miner UID: {uid}")
-
-    # Payment for submission (anti-spam)
-    payment_receipt = None
-    if not skip_payment:
-        if payment_recipient is None:
-            print("Error: Payment recipient address required (use --payment-recipient)")
-            print("For testing, use --skip-payment")
-            return None
-
-        payment_manager = PaymentManager(wallet=wallet, subtensor=chain.subtensor)
-        cost_rao, cost_tao = payment_manager.get_submission_cost()
-
-        # Confirm payment
-        print(f"\n💰 Submission Cost: {cost_rao:,} RAO ({cost_tao:.4f} TAO)")
-        print(f"📍 Payment Recipient: {payment_recipient}")
-
-        confirm = input("\nProceed with payment? (y/n): ").strip().lower()
-        if confirm != "y":
-            print("Payment cancelled. Submission aborted.")
-            return None
-
-        try:
-            print("Processing payment...")
-            payment_receipt = await payment_manager.make_payment(
-                recipient_address=payment_recipient,
-            )
-            print("✅ Payment confirmed!")
-            print(f"   Block: {payment_receipt.block_hash}")
-            print(f"   Extrinsic: {payment_receipt.extrinsic_index}")
-        except Exception as e:
-            print(f"Error: Payment failed: {e}")
-            return None
-    else:
-        print("⚠️  Skipping payment (testing mode)")
-
-    # ANTI-COPYING: Post code hash AND fingerprint to blockchain FIRST
-    # This prevents malicious validators from stealing code and claiming it as their own
-    # The fingerprint allows cross-validator copy detection even for modified code
-    fingerprint = compute_fingerprint(code)
-    fingerprint_chain = fingerprint.to_chain_format()
-    
-    print(f"\n🔐 Posting code hash + fingerprint to blockchain for timestamp proof...")
-    print(f"   Hash: {code_hash}")
-    print(f"   Fingerprint: {fingerprint_chain}")
-    
-    code_timestamp_block = None
-    code_timestamp_extrinsic = None
-    code_fingerprint = None
-    
+    # Verify the URL is accessible and contains valid code
     try:
-        # Post hash AND fingerprint to blockchain using commit extrinsic
-        # This creates immutable proof: "Miner X had code_hash Y at block Z"
-        # Fingerprint enables detection even if code is slightly modified
-        hparams = get_hparams()
-        netuid = hparams.netuid
-        
-        # Get network from chain manager if available, otherwise from config
-        app_config = get_config()
-        network = app_config.subtensor_network
-        if 'chain' in locals() and chain.subtensor:
-            network = chain.subtensor.network
-        
+        req = urllib.request.Request(final_url, headers={"User-Agent": "templar-crusades"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            code = response.read().decode("utf-8")
+
+            # Check it's not HTML (indicates folder/page, not file)
+            if "<html" in code.lower()[:500] or "<!doctype html" in code.lower()[:500]:
+                return False, "URL returns HTML page, not a code file. Use raw file URL."
+
+            # Check it's not JSON (could be API response listing files)
+            if code.strip().startswith("{") and '"files"' in code[:500]:
+                return False, "URL returns JSON (possibly file listing), not a single code file."
+
+            # Basic validation - must contain inner_steps
+            if "def inner_steps" not in code:
+                return False, "Code must contain 'def inner_steps' function"
+
+            # Size sanity check (single file should be < 100KB typically)
+            if len(code) > 500_000:  # 500KB max
+                return False, f"File too large ({len(code)} bytes). Max 500KB for single train.py"
+
+            print(f"   ✓ URL accessible ({len(code)} bytes)")
+            print("   ✓ Single file detected")
+            print("   ✓ Contains inner_steps function")
+
+    except urllib.error.HTTPError as e:
+        return False, f"Cannot access URL: HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"Cannot access URL: {e.reason}"
+    except Exception as e:
+        return False, f"Error validating URL: {e}"
+
+    return True, final_url
+
+
+def commit_to_chain(
+    wallet: bt.wallet,
+    code_url: str,
+    network: str = "finney",
+) -> tuple[bool, dict | str]:
+    """Commit code URL to blockchain (timelock encrypted).
+
+    The URL is encrypted via drand and only revealed after reveal_blocks.
+    This keeps your code location private until evaluation time.
+
+    Args:
+        wallet: Bittensor wallet
+        code_url: URL containing train.py code
+        network: Subtensor network (finney, test, or local)
+
+    Returns:
+        Tuple of (success, result_dict or error_message)
+    """
+    # Load settings from hparams
+    hparams = HParams.load()
+    netuid = hparams.netuid
+    blocks_until_reveal = hparams.reveal_blocks
+    block_time = hparams.block_time
+
+    # Connect to blockchain first to check registration
+    print(f"\nConnecting to {network}...")
+    try:
         subtensor = bt.subtensor(network=network)
-        
-        # Get current block number (will be the commit block)
         current_block = subtensor.get_current_block()
-        
-        # Combine hash and fingerprint for commitment
-        # Format: "hash|fingerprint" so validators can parse both
-        commitment_data = f"{code_hash}|{fingerprint_chain}"
-        
-        # Post commitment to blockchain (netuid required!)
-        print(f"   Posting to subnet {netuid} at block ~{current_block}...")
-        success = subtensor.commit(
+        print(f"   Current block: {current_block}")
+    except Exception as e:
+        return False, f"Failed to connect to {network}: {e}"
+
+    # Check if hotkey is registered on subnet
+    hotkey = wallet.hotkey.ss58_address
+    if not subtensor.is_hotkey_registered(netuid=netuid, hotkey_ss58=hotkey):
+        return False, f"Hotkey {hotkey} is not registered on subnet {netuid}"
+
+    # Get miner UID
+    uid = subtensor.get_uid_for_hotkey_on_subnet(hotkey_ss58=hotkey, netuid=netuid)
+    print(f"   Miner UID: {uid}")
+
+    print("\nCommitting to blockchain...")
+    print(f"   Network: {network}")
+    print(f"   Subnet: {netuid} (from hparams.json)")
+    print(f"   Hotkey: {wallet.hotkey.ss58_address}")
+    print(f"   Reveal blocks: {blocks_until_reveal} (from hparams.json)")
+    print(f"   Block time: {block_time}s (from hparams.json)")
+
+    # Commitment data - just the code URL!
+    commitment_data = json.dumps(
+        {
+            "code_url": code_url,
+        },
+        separators=(",", ":"),
+    )
+
+    print(f"   Commitment size: {len(commitment_data)} bytes")
+
+    # Commit using timelock encryption (drand)
+    print("\nCommitting to chain...")
+    print("   Using set_reveal_commitment (timelock encrypted)")
+
+    try:
+        if not hasattr(subtensor, "set_reveal_commitment"):
+            return False, "Subtensor does not support set_reveal_commitment()"
+
+        success, reveal_round = subtensor.set_reveal_commitment(
             wallet=wallet,
             netuid=netuid,
             data=commitment_data,
+            blocks_until_reveal=blocks_until_reveal,
+            block_time=block_time,
         )
-        
+
         if success:
-            # Commitment posted! Get the block number
             commit_block = subtensor.get_current_block()
-            
-            print(f"   ✅ Code hash + fingerprint timestamped on blockchain")
-            print(f"   Block: {commit_block}")
-            print(f"   Hash: {code_hash[:32]}...")
-            print(f"   Fingerprint: {fingerprint_chain}")
-            print(f"   This proves you created this code at block {commit_block}!")
-            
-            # Use block number as timestamp proof
-            code_timestamp_block = str(commit_block)
-            code_timestamp_extrinsic = 0  # Index within block (we don't have exact index)
-            code_fingerprint = fingerprint_chain
+            reveal_block = commit_block + blocks_until_reveal
+
+            result = {
+                "code_url": code_url,
+                "commit_block": commit_block,
+                "reveal_block": reveal_block,
+                "reveal_round": reveal_round,
+                "hotkey": wallet.hotkey.ss58_address,
+                "netuid": netuid,
+            }
+
+            print("\n✓ Commitment successful!")
+            print(f"   Commit block: {commit_block}")
+            print(f"   Reveal block: {reveal_block}")
+            print(f"   Reveal round: {reveal_round}")
+            print(f"\nValidators will evaluate after block {reveal_block}")
+
+            return True, result
         else:
-            print(f"   ⚠️  Blockchain timestamp failed")
-            code_timestamp_block = None
-            code_timestamp_extrinsic = None
-            code_fingerprint = None
+            return False, "Commitment transaction failed"
+
     except Exception as e:
-        print(f"   ⚠️  Could not post to blockchain: {e}")
-        print(f"   Proceeding without timestamp (reduced protection)")
-        code_timestamp_block = None
-        code_timestamp_extrinsic = None
-        code_fingerprint = fingerprint_chain  # Still include fingerprint in submission
-    
-    # Submit code to validator API
-    print(f"\nSubmitting code to validator API: {validator_api_url}")
-    
-    # Prepare submission data
-    # Sign timestamp with hotkey for authentication
-    timestamp = int(time.time())
-    signature = wallet.hotkey.sign(str(timestamp).encode()).hex()
-    
-    submission_data = {
-        "code": code,
-        "code_hash": code_hash,
-        "miner_hotkey": hotkey,
-        "miner_uid": uid,
-        "timestamp": timestamp,
-        "signature": signature,
-        "payment_block_hash": payment_receipt.block_hash if payment_receipt else None,
-        "payment_extrinsic_index": payment_receipt.extrinsic_index if payment_receipt else None,
-        "payment_amount_rao": payment_receipt.amount_rao if payment_receipt else None,
-        "code_timestamp_block_hash": code_timestamp_block,
-        "code_timestamp_extrinsic_index": code_timestamp_extrinsic,
-        "code_fingerprint": code_fingerprint,  # Structural fingerprint for cross-validator copy detection
-    }
-    
+        return False, f"Blockchain error: {e}"
+
+
+def cmd_submit(args):
+    """Submit a code URL to the crusades."""
+    wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
+
+    print("=" * 60)
+    print("TEMPLAR CRUSADES - SUBMIT CODE")
+    print("=" * 60)
+    print(f"\nWallet: {args.wallet_name}/{args.wallet_hotkey}")
+    print(f"Hotkey: {wallet.hotkey.ss58_address}")
+
+    # Validate code URL
+    print("\n--- STEP 1: VALIDATE CODE URL ---")
+    print("Validating URL...")
+    print(f"   URL: {args.code_url}")
+
+    valid, result = validate_code_url(args.code_url)
+    if not valid:
+        print(f"\n✗ Invalid URL: {result}")
+        return 1
+
+    final_url = result
+    print(f"   Final URL: {final_url}")
+
+    # Commit to blockchain
+    print("\n--- STEP 2: COMMIT TO BLOCKCHAIN ---")
+
+    success, result = commit_to_chain(
+        wallet=wallet,
+        code_url=final_url,
+        network=args.network,
+    )
+
+    if success:
+        print("\n" + "=" * 60)
+        print("SUBMISSION COMPLETE!")
+        print("=" * 60)
+        print("\nYour code URL is now timelock encrypted on the blockchain.")
+        print(f"After block {result['reveal_block']}, validators will:")
+        print("  1. Decrypt and retrieve your code URL")
+        print("  2. Fetch your train.py code")
+        print("  3. Evaluate and score your submission")
+        print("\n⚠️  Do NOT delete or modify your code until evaluation is complete!")
+        return 0
+    else:
+        print(f"\n✗ Commit failed: {result}")
+        return 1
+
+
+def cmd_status(args):
+    """Check blockchain status and connection."""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{validator_api_url}/api/submissions",
-                json=submission_data,
-            )
-            
-            if response.status_code != 200:
-                print(f"Error: Validator API returned {response.status_code}")
-                print(f"       {response.text}")
-                return None
-            
-            result = response.json()
-            submission_id = result.get("submission_id")
-            
-            print("✅ Submission accepted by validator")
-            print(f"\n📋 Submission Details:")
-            print(f"   ID: {submission_id}")
-            print(f"   Code Hash: {code_hash[:16]}...")
-            print(f"   Status: pending")
-            
-            print(f"\n📊 Track your submission:")
-            print(f"   curl {validator_api_url}/api/submissions/{submission_id}")
-            
-            return submission_id
-            
-    except httpx.RequestError as e:
-        print(f"Error: Failed to connect to validator API")
-        print(f"       {e}")
-        print(f"\n💡 Make sure validator is running at: {validator_api_url}")
-        return None
+        print(f"\nConnecting to {args.network}...")
+        subtensor = bt.subtensor(network=args.network)
+        current_block = subtensor.get_current_block()
+
+        # Load hparams
+        hparams = HParams.load()
+
+        print("\n✓ Connected to blockchain")
+        print(f"   Network: {args.network}")
+        print(f"   Current block: {current_block}")
+        print(f"   Subnet: {hparams.netuid}")
+        print(f"   Reveal blocks: {hparams.reveal_blocks}")
+        print(f"   Block time: {hparams.block_time}s")
+
+        # Check if subnet exists
+        if subtensor.subnet_exists(hparams.netuid):
+            print(f"\n✓ Subnet {hparams.netuid} exists")
+            try:
+                meta = bt.metagraph(netuid=hparams.netuid, network=args.network)
+                print(f"   Neurons: {meta.n.item()}")
+            except Exception as e:
+                print(f"   (Could not fetch neuron count: {e})")
+        else:
+            print(f"\n⚠ Subnet {hparams.netuid} does not exist on {args.network}")
+
+        return 0
+
     except Exception as e:
-        print(f"Error: Submission failed: {e}")
-        return None
+        print(f"\n✗ Error: {e}")
+        return 1
+
+
+def cmd_validate(args):
+    """Validate a code URL without submitting."""
+    print("=" * 60)
+    print("VALIDATE CODE URL")
+    print("=" * 60)
+    print(f"\nValidating: {args.code_url}")
+
+    valid, result = validate_code_url(args.code_url)
+
+    if valid:
+        print("\n✓ URL is valid!")
+        print(f"   Final URL: {result}")
+        print("\nTo submit, run:")
+        print(
+            f"  uv run -m neurons.miner submit '{result}' --wallet.name <name> --wallet.hotkey <hotkey>"
+        )
+        return 0
+    else:
+        print(f"\n✗ Invalid: {result}")
+        return 1
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Submit training code to templar-tournament")
-    parser.add_argument(
-        "code_path",
-        type=Path,
-        help="Path to train.py file",
+    parser = argparse.ArgumentParser(
+        description="Templar Crusades Miner CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+How to Submit:
+
+  1. Host your train.py code at any URL:
+     - GitHub Gist (secret recommended)
+     - Raw GitHub file
+     - Pastebin or any paste service
+     - Any HTTP/HTTPS URL that returns the code
+
+  2. Submit to the crusades:
+     uv run -m neurons.miner submit <code_url> \\
+         --wallet.name miner --wallet.hotkey default --network finney
+
+  3. Your code URL is timelock encrypted - validators can only see it
+     after reveal_blocks pass.
+
+Examples:
+  # Validate a URL without submitting
+  uv run -m neurons.miner validate https://example.com/train.py
+
+  # Submit to mainnet
+  uv run -m neurons.miner submit https://example.com/train.py \\
+      --wallet.name miner --wallet.hotkey default --network finney
+
+  # Check blockchain status
+  uv run -m neurons.miner status --network finney
+
+Settings from hparams.json:
+  netuid        - Subnet ID
+  reveal_blocks - Blocks until commitment revealed
+  block_time    - Seconds per block (for drand calculation)
+        """,
     )
-    parser.add_argument(
-        "--wallet.name",
-        dest="wallet_name",
-        type=str,
-        default="default",
-        help="Wallet name",
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # SUBMIT command
+    submit_parser = subparsers.add_parser("submit", help="Submit a code URL to the crusades")
+    submit_parser.add_argument("code_url", help="URL containing your train.py code")
+    submit_parser.add_argument("--wallet.name", dest="wallet_name", default="default")
+    submit_parser.add_argument("--wallet.hotkey", dest="wallet_hotkey", default="default")
+    submit_parser.add_argument(
+        "--network", default="finney", help="Network: finney (mainnet), test, or local"
     )
-    parser.add_argument(
-        "--wallet.hotkey",
-        dest="wallet_hotkey",
-        type=str,
-        default="default",
-        help="Wallet hotkey",
+    submit_parser.set_defaults(func=cmd_submit)
+
+    # VALIDATE command
+    validate_parser = subparsers.add_parser(
+        "validate", help="Validate a code URL without submitting"
     )
-    parser.add_argument(
-        "--skip-validation",
-        action="store_true",
-        help="Skip local code validation",
+    validate_parser.add_argument("code_url", help="URL to validate")
+    validate_parser.set_defaults(func=cmd_validate)
+
+    # STATUS command
+    status_parser = subparsers.add_parser("status", help="Check blockchain status")
+    status_parser.add_argument(
+        "--network", default="finney", help="Network: finney (mainnet), test, or local"
     )
-    parser.add_argument(
-        "--skip-payment",
-        action="store_true",
-        help="Skip payment (for local testing only)",
-    )
-    parser.add_argument(
-        "--payment-recipient",
-        type=str,
-        default=None,
-        help="SS58 address to send payment to (validator address)",
-    )
-    parser.add_argument(
-        "--validator-api",
-        type=str,
-        required=True,
-        help="Validator API endpoint (e.g., http://validator.example.com:8000)",
-    )
+    status_parser.set_defaults(func=cmd_status)
 
     args = parser.parse_args()
 
-    # Initialize wallet
-    wallet = bt.wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
+    if args.command is None:
+        parser.print_help()
+        return 1
 
-    # Run submission
-    submission_id = asyncio.run(
-        submit_code(
-            code_path=args.code_path,
-            wallet=wallet,
-            skip_validation=args.skip_validation,
-            skip_payment=args.skip_payment,
-            payment_recipient=args.payment_recipient,
-            validator_api_url=args.validator_api,
-        )
-    )
-
-    if submission_id:
-        print("\nSubmission successful!")
-        print(f"Track status at: /submissions/{submission_id}/status")
-        sys.exit(0)
-    else:
-        print("\nSubmission failed")
-        sys.exit(1)
+    return args.func(args)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

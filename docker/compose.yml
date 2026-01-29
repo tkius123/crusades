@@ -1,0 +1,102 @@
+# Templar Crusades - Docker Compose with Watchtower
+#
+# Features:
+# - Auto-restart on crash (restart: unless-stopped)
+# - Auto-update when new image is pushed (Watchtower)
+#
+# Usage:
+#   cp .env.example .env
+#   # Edit .env with your wallet details
+#   docker-compose up -d
+#
+# Logs:
+#   docker-compose logs -f validator
+
+services:
+  validator:
+    image: ghcr.io/one-covenant/templar-crusades:latest
+    container_name: templar-crusades-validator
+    restart: unless-stopped
+    runtime: nvidia
+    
+    volumes:
+      # Wallet access
+      - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+      # Docker socket for spawning evaluation containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent database
+      - ./data:/app/data
+      # Logs
+      - ./logs:/app/logs
+      # Hyperparameters (can be overridden)
+      - ./hparams:/app/hparams:ro
+    
+    environment:
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - NETUID=${NETUID:-1}
+      - NETWORK=${NETWORK:-finney}
+      - AFFINETES_MODE=${AFFINETES_MODE:-docker}
+      - DATABASE_PATH=/app/data/crusades.db
+      # GPU settings (passed to evaluation containers)
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      # Logging
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # TUI Dashboard (optional, for monitoring)
+  tui:
+    image: ghcr.io/one-covenant/templar-crusades:latest
+    container_name: templar-crusades-tui
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    
+    volumes:
+      - ./data:/app/data:ro
+    
+    environment:
+      - DATABASE_PATH=/app/data/crusades.db
+    
+    command: ["python", "-m", "crusades.tui", "--db", "/app/data/crusades.db"]
+    
+    # TUI needs interactive terminal
+    stdin_open: true
+    tty: true
+
+  # Watchtower - Auto-updates containers when new images are pushed
+  watchtower:
+    image: containrrr/watchtower
+    container_name: templar-crusades-watchtower
+    restart: unless-stopped
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    
+    command: --interval 300 --cleanup --label-enable
+    
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      # For private GitHub Container Registry
+      - REPO_USER=${GITHUB_USER:-}
+      - REPO_PASSWORD=${GITHUB_TOKEN:-}
