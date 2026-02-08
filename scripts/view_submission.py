@@ -103,7 +103,7 @@ def view_submission(db_path: str, submission_id: str, save: bool = False):
         # Get evaluations for this submission
         cur.execute(
             """
-            SELECT evaluation_id, mfu, tokens_per_second, total_tokens, 
+            SELECT evaluation_id, mfu, tokens_per_second, total_tokens,
                    wall_time_seconds, success, error, created_at
             FROM evaluations
             WHERE submission_id = ?

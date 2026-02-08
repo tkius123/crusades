@@ -4,7 +4,7 @@ URL-Based Architecture:
 1. Reads code URL commitments from blockchain (timelock decrypted)
 2. Downloads miner's train.py from the committed URL
 3. Evaluates via affinetes (Docker locally or Basilica remotely)
-4. Sets weights based on TPS scores
+4. Sets weights based on MFU (Model FLOPs Utilization) scores
 """
 
 import argparse
@@ -252,12 +252,16 @@ class Validator(BaseNode):
                                 f"at block {commitment.reveal_block} (previously saw block {first_block})"
                             )
 
-                    await self._create_submission_from_commitment(commitment)
-                    # Record this URL with the committer info
-                    self.evaluated_code_urls[code_url] = (
-                        commitment.reveal_block,
-                        commitment.hotkey,
-                    )
+                    try:
+                        await self._create_submission_from_commitment(commitment)
+                        # Only record URL if submission was successfully saved
+                        self.evaluated_code_urls[code_url] = (
+                            commitment.reveal_block,
+                            commitment.hotkey,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to create submission for {code_url[:60]}: {e}")
+                        # Don't record URL - will retry on next cycle
 
             self.last_processed_block = current_block
             await self._save_state()
@@ -281,6 +285,7 @@ class Validator(BaseNode):
                 return
         except Exception as e:
             logger.error(f"Database error checking existing submission: {e}")
+            return  # Don't proceed if we can't check for duplicates
 
         # Rate limiting
         min_blocks = hparams.min_blocks_between_commits
@@ -320,13 +325,14 @@ class Validator(BaseNode):
 
         try:
             await self.db.save_submission(submission)
-            logger.info(f"✓ Created submission: {submission_id}")
+            logger.info(f"Created submission: {submission_id}")
             logger.info(f"   Code URL: {commitment.code_url_info.url[:60]}...")
             logger.info(f"   UID: {commitment.uid}")
             logger.info(f"   Hotkey: {commitment.hotkey[:16]}...")
         except Exception as e:
             logger.error(f"Failed to save submission: {e}")
             logger.exception("Traceback:")
+            raise  # Propagate so caller doesn't mark URL as processed
 
     def _download_from_url(self, code_url: str) -> tuple[bool, str]:
         """Download train.py code from a URL with SSRF protection.
@@ -377,21 +383,30 @@ class Validator(BaseNode):
             # Build opener with SSRF-safe redirect handler
             opener = urllib.request.build_opener(SSRFSafeRedirectHandler())
 
+            max_size = 500_000
             req = urllib.request.Request(code_url, headers={"User-Agent": "templar-crusades"})
             with opener.open(req, timeout=30) as response:
-                code = response.read().decode("utf-8")
+                # Read in chunks to prevent OOM from malicious large responses
+                chunks = []
+                total_bytes = 0
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_size:
+                        return False, f"File too large (>{max_size} bytes). Max 500KB"
+                    chunks.append(chunk)
+                code = b"".join(chunks).decode("utf-8")
 
                 # Reject HTML (folder page, not raw file)
-                if "<html" in code.lower()[:500] or "<!doctype html" in code.lower()[:500]:
+                code_start_lower = code[:500].lower()
+                if "<html" in code_start_lower or "<!doctype html" in code_start_lower:
                     return False, "URL returns HTML page, not a code file"
 
                 # Reject JSON file listings
                 if code.strip().startswith("{") and '"files"' in code[:500]:
                     return False, "URL returns JSON (file listing), not code"
-
-                # Size limit (500KB)
-                if len(code) > 500_000:
-                    return False, f"File too large ({len(code)} bytes). Max 500KB"
 
                 # Must contain inner_steps
                 if "def inner_steps" not in code:
@@ -455,6 +470,7 @@ class Validator(BaseNode):
             logger.info(f"   Downloaded {len(miner_code)} bytes")
 
             # Run evaluations
+            fatal_error = False
             for run_idx in range(runs_remaining):
                 current_run = len(my_evals) + run_idx + 1
                 seed = f"{submission.miner_uid}:{current_run}:{int(time.time())}"
@@ -491,6 +507,15 @@ class Validator(BaseNode):
                 await self.db.save_evaluation(evaluation)
                 self._cleanup_memory()
 
+                # Fatal errors are deterministic - same code will always fail the same way
+                # No point retrying, and if a previous run passed, that's a bug to investigate
+                if result.is_fatal():
+                    logger.warning(
+                        f"Fatal error detected ({result.error_code}), skipping remaining runs"
+                    )
+                    fatal_error = True
+                    break
+
             # Persist state (URL already recorded during commitment processing)
             await self._save_state()
 
@@ -498,16 +523,42 @@ class Validator(BaseNode):
             await self.db.update_submission_code(submission.submission_id, miner_code)
             logger.info(f"Stored code for {submission.submission_id} in database")
 
-            # Finalize submission
-            await self._finalize_submission(submission.submission_id, num_runs)
+            # Finalize submission (pass fatal_error to skip unnecessary checks)
+            await self._finalize_submission(
+                submission.submission_id, num_runs, fatal_error=fatal_error
+            )
 
-    async def _finalize_submission(self, submission_id: str, num_runs: int) -> None:
-        """Calculate final score (MFU) and update submission status."""
+    async def _finalize_submission(
+        self, submission_id: str, num_runs: int, fatal_error: bool = False
+    ) -> None:
+        """Calculate final score (MFU) and update submission status.
+
+        Args:
+            submission_id: The submission to finalize
+            num_runs: Expected number of evaluation runs
+            fatal_error: If True, a deterministic failure was detected and
+                         evaluation was stopped early - fail immediately
+        """
         hparams = get_hparams()
         num_evals = await self.db.count_evaluations(submission_id)
         required_evals = num_runs
 
         logger.info(f"Finalizing {submission_id}: {num_evals}/{required_evals} evaluations")
+
+        # If fatal error detected, fail immediately without checking success rate
+        # Fatal errors are deterministic - retrying would give the same result
+        if fatal_error:
+            all_evals = await self.db.get_evaluations(submission_id)
+            # Get the error message from the most recent failed evaluation
+            failed_evals = [e for e in all_evals if not e.success and e.error]
+            error_msg = failed_evals[-1].error if failed_evals else "Fatal error in evaluation"
+            await self.db.update_submission_status(
+                submission_id,
+                SubmissionStatus.FAILED_EVALUATION,
+                error_message=f"Fatal error (deterministic failure): {error_msg}",
+            )
+            logger.warning(f"Submission {submission_id} failed with fatal error: {error_msg}")
+            return
 
         if num_evals >= required_evals:
             all_evals = await self.db.get_evaluations(submission_id)
@@ -547,6 +598,15 @@ class Validator(BaseNode):
                     SubmissionStatus.FINISHED,
                 )
                 logger.info(f"Submission {submission_id} FINISHED with MFU={median_mfu:.2f}%")
+
+                # Check if this submission is the new leader and update threshold immediately
+                # This provides immediate feedback on website/TUI instead of waiting for
+                # the next weight-setting cycle (~20 minutes)
+                try:
+                    await self._check_and_update_threshold_if_new_leader(submission_id, median_mfu)
+                except Exception as e:
+                    logger.warning(f"Failed to check/update threshold (non-fatal): {e}")
+                    # Continue - weight setter will handle this on next cycle
             else:
                 # All evaluations failed - mark submission as failed with score 0
                 await self.db.update_submission_score(submission_id, 0.0)
@@ -556,6 +616,97 @@ class Validator(BaseNode):
                     error_message="All evaluations failed",
                 )
                 logger.warning(f"Submission {submission_id} FAILED: all evaluations failed")
+
+    async def _check_and_update_threshold_if_new_leader(
+        self, submission_id: str, score: float
+    ) -> None:
+        """Update adaptive threshold immediately if this submission is the new leader.
+
+        This provides immediate feedback on the website/TUI instead of waiting
+        for the next weight-setting cycle (which can be ~20 minutes).
+
+        Shares state with weight_setter via database to avoid duplicate updates.
+        """
+        hparams = get_hparams()
+        threshold_config = hparams.adaptive_threshold
+
+        # Cannot update without block number - would corrupt decay state
+        if self.commitment_reader is None:
+            logger.debug("Skipping immediate threshold update: no commitment_reader")
+            return
+
+        current_block = self.commitment_reader.get_current_block()
+
+        # Get current threshold (with decay applied)
+        current_threshold = await self.db.get_adaptive_threshold(
+            current_block=current_block,
+            base_threshold=threshold_config.base_threshold,
+            decay_percent=threshold_config.decay_percent,
+            decay_interval_blocks=threshold_config.decay_interval_blocks,
+        )
+
+        # Get the current leaderboard winner (after this submission was marked FINISHED)
+        winner = await self.db.get_leaderboard_winner(
+            threshold=current_threshold,
+            spec_version=crusades.COMPETITION_VERSION,
+        )
+
+        if winner is None:
+            return
+
+        # Check if THIS submission is the new leader
+        if winner.submission_id != submission_id:
+            return  # Not the new leader, nothing to do
+
+        # This submission is the new leader! Update threshold immediately.
+        # Load previous winner from DB (shared state with weight setter)
+        previous_winner_id = await self.db.get_validator_state("previous_winner_id")
+        previous_winner_score_str = await self.db.get_validator_state("previous_winner_score")
+
+        # Safe float conversion with error handling
+        previous_winner_score = 0.0
+        if previous_winner_score_str:
+            try:
+                previous_winner_score = float(previous_winner_score_str)
+            except ValueError:
+                logger.warning(f"Invalid previous_winner_score in DB: {previous_winner_score_str}")
+                previous_winner_score = 0.0
+
+        # Only update if this is a NEW leader (different from previous)
+        if previous_winner_id == submission_id:
+            return  # Same leader, threshold already updated
+
+        # Save winner identity FIRST to prevent duplicate threshold updates.
+        # If threshold update below fails, the next cycle will see this winner
+        # as "already handled" and skip it. If we saved identity after threshold,
+        # a failure between them would cause the threshold to be bumped twice.
+        await self.db.set_validator_state("previous_winner_id", submission_id)
+        await self.db.set_validator_state("previous_winner_score", str(score))
+
+        # Update adaptive threshold
+        if previous_winner_score > 0:
+            new_threshold = await self.db.update_adaptive_threshold(
+                new_score=score,
+                old_score=previous_winner_score,
+                current_block=current_block,
+                base_threshold=threshold_config.base_threshold,
+            )
+            improvement = (score - previous_winner_score) / previous_winner_score * 100
+            logger.info(
+                f"NEW LEADER (immediate)! Threshold updated:\n"
+                f"  - Previous: {previous_winner_score:.2f}% MFU\n"
+                f"  - New: {score:.2f}% MFU (+{improvement:.1f}%)\n"
+                f"  - New threshold: {new_threshold:.1%}"
+            )
+        else:
+            # First winner ever
+            await self.db.update_adaptive_threshold(
+                new_score=score,
+                old_score=0.0,
+                current_block=current_block,
+                base_threshold=threshold_config.base_threshold,
+            )
+            logger.info(f"First leader established (immediate): {score:.2f}% MFU")
 
     def _cleanup_memory(self):
         """Clean up GPU memory."""
@@ -753,9 +904,7 @@ class Validator(BaseNode):
         from crusades import COMPETITION_VERSION
 
         try:
-            await self.db.set_validator_state(
-                "competition_version", str(COMPETITION_VERSION)
-            )
+            await self.db.set_validator_state("competition_version", str(COMPETITION_VERSION))
             await self.db.set_validator_state(
                 "last_processed_block", str(self.last_processed_block)
             )

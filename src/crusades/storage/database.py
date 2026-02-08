@@ -293,9 +293,7 @@ class Database:
             threshold: Adaptive threshold for determining #1
         """
         # Get threshold winner (position #1)
-        winner = await self.get_leaderboard_winner(
-            threshold=threshold, spec_version=spec_version
-        )
+        winner = await self.get_leaderboard_winner(threshold=threshold, spec_version=spec_version)
 
         async with self.session_factory() as session:
             # Get all finished submissions sorted by raw score
@@ -410,11 +408,11 @@ class Database:
             # Calculate decay based on blocks elapsed
             # Each step loses decay_percent of the excess above base
             blocks_elapsed = max(0, current_block - state.last_update_block)
-            
+
             # Guard against misconfigured decay_interval_blocks (avoid division by zero)
             if decay_interval_blocks <= 0:
                 return state.current_threshold
-            
+
             decay_steps = blocks_elapsed / decay_interval_blocks
             decay_factor = (1.0 - decay_percent) ** decay_steps
 

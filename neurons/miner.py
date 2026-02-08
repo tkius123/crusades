@@ -89,9 +89,9 @@ def validate_code_url(url: str) -> tuple[bool, str]:
             if len(code) > 500_000:  # 500KB max
                 return False, f"File too large ({len(code)} bytes). Max 500KB for single train.py"
 
-            print(f"   ✓ URL accessible ({len(code)} bytes)")
-            print("   ✓ Single file detected")
-            print("   ✓ Contains inner_steps function")
+            print(f"   [OK] URL accessible ({len(code)} bytes)")
+            print("   [OK] Single file detected")
+            print("   [OK] Contains inner_steps function")
 
     except urllib.error.HTTPError as e:
         return False, f"Cannot access URL: HTTP {e.code}"
@@ -191,7 +191,7 @@ def commit_to_chain(
                 "netuid": netuid,
             }
 
-            print("\n✓ Commitment successful!")
+            print("\n[OK] Commitment successful!")
             print(f"   Commit block: {commit_block}")
             print(f"   Reveal block: {reveal_block}")
             print(f"   Reveal round: {reveal_round}")
@@ -222,7 +222,7 @@ def cmd_submit(args):
 
     valid, result = validate_code_url(args.code_url)
     if not valid:
-        print(f"\n✗ Invalid URL: {result}")
+        print(f"\n[FAILED] Invalid URL: {result}")
         return 1
 
     final_url = result
@@ -246,10 +246,10 @@ def cmd_submit(args):
         print("  1. Decrypt and retrieve your code URL")
         print("  2. Fetch your train.py code")
         print("  3. Evaluate and score your submission")
-        print("\n⚠️  Do NOT delete or modify your code until evaluation is complete!")
+        print("\nWARNING: Do NOT delete or modify your code until evaluation is complete!")
         return 0
     else:
-        print(f"\n✗ Commit failed: {result}")
+        print(f"\n[FAILED] Commit failed: {result}")
         return 1
 
 
@@ -263,7 +263,7 @@ def cmd_status(args):
         # Load hparams
         hparams = HParams.load()
 
-        print("\n✓ Connected to blockchain")
+        print("\n[OK] Connected to blockchain")
         print(f"   Network: {args.network}")
         print(f"   Current block: {current_block}")
         print(f"   Subnet: {hparams.netuid}")
@@ -272,19 +272,19 @@ def cmd_status(args):
 
         # Check if subnet exists
         if subtensor.subnet_exists(hparams.netuid):
-            print(f"\n✓ Subnet {hparams.netuid} exists")
+            print(f"\n[OK] Subnet {hparams.netuid} exists")
             try:
                 meta = bt.metagraph(netuid=hparams.netuid, network=args.network)
                 print(f"   Neurons: {meta.n.item()}")
             except Exception as e:
                 print(f"   (Could not fetch neuron count: {e})")
         else:
-            print(f"\n⚠ Subnet {hparams.netuid} does not exist on {args.network}")
+            print(f"\n[WARNING] Subnet {hparams.netuid} does not exist on {args.network}")
 
         return 0
 
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n[ERROR] {e}")
         return 1
 
 
@@ -298,7 +298,7 @@ def cmd_validate(args):
     valid, result = validate_code_url(args.code_url)
 
     if valid:
-        print("\n✓ URL is valid!")
+        print("\n[OK] URL is valid!")
         print(f"   Final URL: {result}")
         print("\nTo submit, run:")
         print(
@@ -306,7 +306,7 @@ def cmd_validate(args):
         )
         return 0
     else:
-        print(f"\n✗ Invalid: {result}")
+        print(f"\n[FAILED] Invalid: {result}")
         return 1
 
 

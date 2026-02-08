@@ -162,7 +162,6 @@ def _load_hf_dataset(
         Tensor of shape [num_samples, sequence_length]
     """
     import json
-    import random
 
     from transformers import AutoTokenizer
 
@@ -348,11 +347,11 @@ def _load_model(model_path: str, use_random_init: bool = False):
         )
 
     model.train()
-    
+
     # Ensure ALL parameters have requires_grad=True for training
     for param in model.parameters():
         param.requires_grad = True
-    
+
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     return model
@@ -606,9 +605,9 @@ class GradientCapturingOptimizer:
     from within the miner's inner_steps execution. This ensures we verify
     gradients produced by miner code, not validator code.
 
-    The previous approach (running final step manually outside inner_steps)
-    was flawed because when steps==1, the miner's inner_steps was never
-    called during full evaluation, only during warmup.
+    Protected attributes (optimizer, model, captured_gradients, step_count,
+    gradient_capture_time) cannot be overwritten by miner code - __setattr__
+    raises AttributeError if miner tries to replace them.
 
     PERFORMANCE: Tracks overhead time separately and excludes it from wall_time
     for fair MFU/TPS calculation. MFU formula (6 * params * tokens) only accounts
@@ -617,26 +616,56 @@ class GradientCapturingOptimizer:
 
     """
 
+    # Attributes that miner code must not be able to replace
+    _PROTECTED_ATTRS = frozenset(
+        {
+            "optimizer",
+            "model",
+            "captured_gradients",
+            "step_count",
+            "gradient_capture_time",
+            "_initialized",
+        }
+    )
+
     def __init__(self, optimizer: torch.optim.Optimizer, model: torch.nn.Module):
-        self.optimizer = optimizer
-        self.model = model
-        self.captured_gradients: GradientInfo | None = None
-        self.step_count = 0
-        self.gradient_capture_time: float = 0.0  # Cumulative time spent in gradient capture
+        # Use object.__setattr__ during init to bypass our protection
+        object.__setattr__(self, "optimizer", optimizer)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "captured_gradients", None)
+        object.__setattr__(self, "step_count", 0)
+        object.__setattr__(self, "gradient_capture_time", 0.0)
+        object.__setattr__(self, "_initialized", True)
+
+    def __setattr__(self, name, value):
+        """Prevent miner code from replacing security-critical attributes."""
+        # Use CLASS reference (not self) to prevent miner from clearing the set
+        # via optimizer._PROTECTED_ATTRS = frozenset()
+        if (
+            getattr(self, "_initialized", False)
+            and name in GradientCapturingOptimizer._PROTECTED_ATTRS
+        ):
+            raise AttributeError(f"Cannot modify protected attribute '{name}' on optimizer wrapper")
+        object.__setattr__(self, name, value)
 
     def step(self, *args, **kwargs):
         """Capture gradients BEFORE optimizer.step() clears them."""
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        
-        # Now time ONLY the gradient capture (GPU→CPU copy for verification)
+
+        # Now time ONLY the gradient capture (GPU->CPU copy for verification)
         # This is validator overhead and should be excluded from wall_time
         capture_start = time.perf_counter()
-        self.captured_gradients = _capture_gradients(self.model)
-        self.gradient_capture_time += time.perf_counter() - capture_start
+        # Use object.__setattr__ to update protected attrs internally
+        object.__setattr__(self, "captured_gradients", _capture_gradients(self.model))
+        object.__setattr__(
+            self,
+            "gradient_capture_time",
+            self.gradient_capture_time + (time.perf_counter() - capture_start),
+        )
 
         # Actual optimizer step (part of miner's training)
-        self.step_count += 1
+        object.__setattr__(self, "step_count", self.step_count + 1)
         return self.optimizer.step(*args, **kwargs)
 
     def zero_grad(self, set_to_none: bool = False):
@@ -703,16 +732,18 @@ def _run_reference(
         batch = next(data_iterator)
         batch = batch.to(device, dtype=torch.long)
 
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            input_ids = batch[:, :-1]
-            labels = batch[:, 1:]
-            outputs = model(input_ids)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                labels.reshape(-1),
-                ignore_index=-100,
-            )
+        # No autocast - model is already in bfloat16.
+        # Using autocast here would change loss computation precision
+        # and create gradient mismatches with miner code that doesn't use autocast.
+        input_ids = batch[:, :-1]
+        labels = batch[:, 1:]
+        outputs = model(input_ids)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+            ignore_index=-100,
+        )
 
         loss.backward()
 
@@ -738,26 +769,36 @@ def _run_reference(
 def _verify_gradients(
     reference_grad: GradientInfo | None,
     candidate_grad: GradientInfo | None,
-    cosine_min: float = 0.8,
-    norm_ratio_min: float = 0.5,
-    norm_ratio_max: float = 2.0,
+    cosine_min: float = 0.8,  # Legacy, unused - kept for signature compat
+    norm_ratio_min: float = 0.5,  # Legacy, unused - kept for signature compat
+    norm_ratio_max: float = 1.02,  # Relative error threshold: 1.02 = 2% max error
 ) -> tuple[bool, str | None, dict]:
-    """Verify candidate gradients match reference using cosine similarity and norm ratio.
+    """Verify candidate gradients match reference using relative error |g - g_truth| / |g_truth|.
+
+    This is a direct comparison that catches any deviation including truncation,
+    layer freezing, and step skipping. The threshold should be near numerical
+    precision (bfloat16 has ~0.8% relative error for accumulated ops).
 
     Args:
         reference_grad: Reference implementation gradients
         candidate_grad: Miner's implementation gradients
-        cosine_min: Minimum cosine similarity required
-        norm_ratio_min: Minimum ratio of candidate/reference gradient norm
-        norm_ratio_max: Maximum ratio of candidate/reference gradient norm
+        cosine_min: (legacy, kept for signature compat) Not used in new check
+        norm_ratio_min: (legacy, kept for signature compat) Not used in new check
+        norm_ratio_max: Maximum allowed relative error |g - g_truth| / |g_truth|
+            Repurposed: norm_ratio_max is used as the relative error threshold.
+            Production default: 0.01 (1% relative error)
 
     Returns:
         Tuple of (success, error_message, details)
     """
+    # Repurpose norm_ratio_max as the relative error threshold
+    # This keeps backward compat with hparams without adding a new field
+    # norm_ratio_max=1.1 means 10% relative error allowed (old default)
+    # norm_ratio_max=1.01 means 1% relative error allowed (tight)
+    relative_error_threshold = norm_ratio_max - 1.0  # e.g., 1.01 -> 0.01
+
     details = {
-        "cosine_min": cosine_min,
-        "norm_ratio_min": norm_ratio_min,
-        "norm_ratio_max": norm_ratio_max,
+        "relative_error_threshold": relative_error_threshold,
         "checks_passed": [],
         "checks_failed": [],
     }
@@ -781,7 +822,7 @@ def _verify_gradients(
     if candidate_grad.total_layers > 0:
         grad_coverage = candidate_grad.layers_with_grad / candidate_grad.total_layers
         details["gradient_coverage"] = grad_coverage
-        logger.info(f"[CHECK 0/3] Gradient coverage: {grad_coverage:.1%}")
+        logger.info(f"[CHECK 0/2] Gradient coverage: {grad_coverage:.1%}")
         logger.info(
             f"   Layers with gradients: {candidate_grad.layers_with_grad}/{candidate_grad.total_layers}"
         )
@@ -798,88 +839,71 @@ def _verify_gradients(
         details["checks_passed"].append("gradient_coverage")
         logger.info("[PASSED] All layers have gradients")
 
-    # Check 1: Gradient norm ratio
-    if reference_grad.grad_norm > 0:
-        norm_ratio = candidate_grad.grad_norm / reference_grad.grad_norm
-        details["norm_ratio"] = norm_ratio
-        logger.info(f"[CHECK 1/3] Gradient norm ratio: {norm_ratio:.4f}")
-        logger.info(f"   Reference norm: {reference_grad.grad_norm:.6f}")
-        logger.info(f"   Candidate norm: {candidate_grad.grad_norm:.6f}")
-        logger.info(f"   Allowed range: [{norm_ratio_min}, {norm_ratio_max}]")
-
-        if norm_ratio < norm_ratio_min or norm_ratio > norm_ratio_max:
-            error = (
-                f"Gradient norm ratio {norm_ratio:.4f} outside allowed range "
-                f"[{norm_ratio_min}, {norm_ratio_max}]"
-            )
-            details["checks_failed"].append({"check": "gradient_norm_ratio", "error": error})
-            details["error_code"] = "gradient_norm_ratio_failed"
-            logger.error(f"[FAILED] {error}")
-            return False, error, details
-        details["checks_passed"].append("gradient_norm_ratio")
-        logger.info("[PASSED] Gradient norm ratio in acceptable range")
-    else:
-        logger.warning("Reference gradient norm is zero, skipping norm ratio check")
-
-    # Check 2: Cosine similarity (computed incrementally to save memory)
-    ref_vecs = reference_grad.grad_vector  # List of per-layer tensors
-    cand_vecs = candidate_grad.grad_vector  # List of per-layer tensors
+    # Check 1: Relative gradient error |g - g_truth| / |g_truth|
+    # This single check replaces both norm ratio and cosine similarity.
+    # It catches ALL deviations: truncation, layer freezing, step skipping, etc.
+    ref_vecs = reference_grad.grad_vector
+    cand_vecs = candidate_grad.grad_vector
 
     if ref_vecs is not None and cand_vecs is not None and len(ref_vecs) > 0:
-        # Verify same number of layers
         if len(ref_vecs) != len(cand_vecs):
             error = f"Gradient layer count mismatch: ref={len(ref_vecs)}, cand={len(cand_vecs)}"
             details["checks_failed"].append({"check": "gradient_shape", "error": error})
             logger.error(f"[FAILED] {error}")
             return False, error, details
 
-        # Compute cosine similarity incrementally (layer-by-layer)
-        # cosine_sim = dot_product / (norm_ref * norm_cand)
-        # We already have norms from GradientInfo, just need dot product
-        dot_product = 0.0
+        # Compute |g - g_truth|^2 and |g_truth|^2 incrementally (layer-by-layer)
+        diff_norm_sq = 0.0
+        ref_norm_sq = 0.0
         total_elements = 0
 
         for ref_layer, cand_layer in zip(ref_vecs, cand_vecs):
             if ref_layer is None or cand_layer is None:
                 continue
 
-            # Verify shape match for this layer
             if ref_layer.shape != cand_layer.shape:
                 error = f"Gradient shape mismatch at layer: ref={ref_layer.shape}, cand={cand_layer.shape}"
                 details["checks_failed"].append({"check": "gradient_shape", "error": error})
                 logger.error(f"[FAILED] {error}")
                 return False, error, details
 
-            # Accumulate dot product (both tensors are on CPU)
-            dot_product += (ref_layer * cand_layer).sum().item()
+            diff = cand_layer - ref_layer
+            diff_norm_sq += (diff * diff).sum().item()
+            ref_norm_sq += (ref_layer * ref_layer).sum().item()
             total_elements += ref_layer.numel()
 
-        # Calculate cosine similarity using pre-computed norms
-        ref_norm = reference_grad.grad_norm
-        cand_norm = candidate_grad.grad_norm
+        ref_norm = ref_norm_sq**0.5
+        diff_norm = diff_norm_sq**0.5
 
-        if ref_norm > 0 and cand_norm > 0:
-            cosine_sim = dot_product / (ref_norm * cand_norm)
+        if ref_norm > 0:
+            relative_error = diff_norm / ref_norm
         else:
-            cosine_sim = 0.0
+            relative_error = 0.0 if diff_norm == 0 else float("inf")
 
-        details["cosine_similarity"] = cosine_sim
+        details["relative_error"] = relative_error
+        details["diff_norm"] = diff_norm
+        details["ref_norm"] = ref_norm
         details["gradient_elements"] = total_elements
 
-        logger.info(f"[CHECK 2/3] Gradient cosine similarity: {cosine_sim:.4f}")
-        logger.info(f"   Minimum required: {cosine_min}")
+        logger.info(f"[CHECK 1/2] Gradient relative error: {relative_error:.6f}")
+        logger.info(f"   |g - g_truth|: {diff_norm:.6f}")
+        logger.info(f"   |g_truth|: {ref_norm:.6f}")
+        logger.info(f"   Max allowed: {relative_error_threshold:.6f}")
         logger.info(f"   Total gradient elements: {total_elements:,}")
 
-        if cosine_sim < cosine_min:
-            error = f"Gradient cosine similarity {cosine_sim:.4f} below minimum {cosine_min}"
-            details["checks_failed"].append({"check": "gradient_cosine", "error": error})
-            details["error_code"] = "gradient_cosine_failed"
+        if relative_error > relative_error_threshold:
+            error = (
+                f"Gradient relative error {relative_error:.6f} exceeds threshold "
+                f"{relative_error_threshold:.6f} (|g - g_truth| / |g_truth|)"
+            )
+            details["checks_failed"].append({"check": "gradient_relative_error", "error": error})
+            details["error_code"] = "gradient_norm_ratio_failed"
             logger.error(f"[FAILED] {error}")
             return False, error, details
-        details["checks_passed"].append("gradient_cosine_similarity")
-        logger.info("[PASSED] Gradient cosine similarity acceptable")
+        details["checks_passed"].append("gradient_relative_error")
+        logger.info("[PASSED] Gradient relative error within threshold")
     else:
-        logger.warning("Gradient vectors unavailable, skipping cosine similarity check")
+        logger.warning("Gradient vectors unavailable, skipping relative error check")
 
     logger.info("=" * 60)
     logger.info("VERIFICATION: GRADIENT CHECKS PASSED")
@@ -898,7 +922,7 @@ def _verify_outputs(
     max_loss_difference: float = 0.5,
     gradient_cosine_min: float = 0.8,
     gradient_norm_ratio_min: float = 0.5,
-    gradient_norm_ratio_max: float = 2.0,
+    gradient_norm_ratio_max: float = 1.02,
 ) -> tuple[bool, str | None, dict]:
     """Verify candidate outputs match reference.
 
@@ -953,32 +977,40 @@ def _verify_outputs(
         details["checks_failed"].append({"check": "loss_validity", "error": error})
         logger.error(f"[FAILED] {error}")
         return False, error, details
-    if abs(candidate.final_loss) > 100:
+    if candidate.final_loss <= 0:
+        error = f"Loss must be positive (cross-entropy > 0): got {candidate.final_loss:.4f}"
+        details["checks_failed"].append({"check": "loss_validity", "error": error})
+        logger.error(f"[FAILED] {error}")
+        return False, error, details
+    if candidate.final_loss > 100:
         error = f"Loss unreasonable: {candidate.final_loss:.4f} (expected 1-10)"
         details["checks_failed"].append({"check": "loss_validity", "error": error})
         logger.error(f"[FAILED] {error}")
         return False, error, details
 
     # Compare losses - check absolute difference
-    if reference is not None and reference.final_loss > 0:
-        loss_difference = abs(candidate.final_loss - reference.final_loss)
-        details["loss_difference"] = loss_difference
-        logger.info(
-            f"   Reference loss: {reference.final_loss:.4f}, "
-            f"Candidate loss: {candidate.final_loss:.4f}"
-        )
-        logger.info(
-            f"   Loss difference: {loss_difference:.4f} (max allowed: {max_loss_difference})"
-        )
+    if reference is None:
+        error = "No reference result available for loss comparison"
+        details["checks_failed"].append({"check": "loss_comparison", "error": error})
+        logger.error(f"[FAILED] {error}")
+        return False, error, details
 
-        if loss_difference > max_loss_difference:
-            error = (
-                f"Loss difference too large: candidate={candidate.final_loss:.4f}, "
-                f"reference={reference.final_loss:.4f}, diff={loss_difference:.4f} > {max_loss_difference}"
-            )
-            details["checks_failed"].append({"check": "loss_comparison", "error": error})
-            logger.error(f"[FAILED] {error}")
-            return False, error, details
+    loss_difference = abs(candidate.final_loss - reference.final_loss)
+    details["loss_difference"] = loss_difference
+    details["reference_loss"] = reference.final_loss
+    logger.info(
+        f"   Reference loss: {reference.final_loss:.4f}, Candidate loss: {candidate.final_loss:.4f}"
+    )
+    logger.info(f"   Loss difference: {loss_difference:.4f} (max allowed: {max_loss_difference})")
+
+    if loss_difference > max_loss_difference:
+        error = (
+            f"Loss difference too large: candidate={candidate.final_loss:.4f}, "
+            f"reference={reference.final_loss:.4f}, diff={loss_difference:.4f} > {max_loss_difference}"
+        )
+        details["checks_failed"].append({"check": "loss_comparison", "error": error})
+        logger.error(f"[FAILED] {error}")
+        return False, error, details
     details["checks_passed"].append("loss_validity")
     logger.info("[PASSED] Loss is valid and similar to reference")
 
@@ -1033,7 +1065,7 @@ class Actor:
         # Gradient verification (replaces logits)
         gradient_cosine_min: float = 0.8,
         gradient_norm_ratio_min: float = 0.5,
-        gradient_norm_ratio_max: float = 2.0,
+        gradient_norm_ratio_max: float = 1.02,
         # MFU calculation
         gpu_peak_tflops: float = 312.0,
         model_params_override: int | None = None,
@@ -1229,9 +1261,22 @@ class Actor:
                         "code": code,
                     }
 
-                # Check logits shape (should be 3D: batch, seq, vocab)
+                # Check logits are present and valid shape
                 logits = warmup_result.final_logits
-                if logits is not None and len(logits.shape) != 3:
+                if logits is None:
+                    return {
+                        "task_id": task_id,
+                        "mfu": 0.0,
+                        "tps": 0.0,
+                        "total_tokens": 0,
+                        "wall_time_seconds": 0.0,
+                        "success": False,
+                        "error": "final_logits is None - must return actual logits for verification",
+                        "error_code": "missing_logits",
+                        "seed": seed,
+                        "code": code,
+                    }
+                if len(logits.shape) != 3:
                     return {
                         "task_id": task_id,
                         "mfu": 0.0,
@@ -1240,6 +1285,7 @@ class Actor:
                         "wall_time_seconds": 0.0,
                         "success": False,
                         "error": f"Logits shape mismatch: expected 3D (batch, seq, vocab), got {logits.shape}",
+                        "error_code": "invalid_logits_shape",
                         "seed": seed,
                         "code": code,
                     }
@@ -1317,7 +1363,7 @@ class Actor:
             total_time = time.perf_counter() - start
 
             # Exclude gradient capture time from wall_time for fair MFU calculation
-            # Gradient capture is validator overhead (copies gradients GPU→CPU for verification)
+            # Gradient capture is validator overhead (copies gradients GPU->CPU for verification)
             # optimizer.step() and zero_grad() ARE part of miner's training, included in wall_time
             gradient_capture_time = optimizer_miner.gradient_capture_time
             wall_time = total_time - gradient_capture_time
@@ -1359,6 +1405,62 @@ class Actor:
                 }
 
             # =================================================================
+            # SEQUENCE LENGTH CHECK - Detect truncation cheating
+            # =================================================================
+            # SECURITY: Miners may truncate sequences to process fewer tokens
+            # while reporting full token count. Check logits sequence dimension.
+            # Expected: seq_len - 1 (causal LM uses batch[:, :-1] as input)
+            expected_seq_len = seq_len - 1
+
+            # SECURITY: Require final_logits to be present (prevent None bypass)
+            if parsed.final_logits is None:
+                return {
+                    "task_id": task_id,
+                    "mfu": 0.0,
+                    "tps": 0.0,
+                    "total_tokens": 0,
+                    "wall_time_seconds": wall_time,
+                    "success": False,
+                    "error": "final_logits is None - must return actual logits for verification",
+                    "error_code": "missing_logits",
+                    "seed": seed,
+                    "code": code,
+                }
+
+            # SECURITY: Verify logits is 3D tensor (batch, seq, vocab)
+            if len(parsed.final_logits.shape) != 3:
+                return {
+                    "task_id": task_id,
+                    "mfu": 0.0,
+                    "tps": 0.0,
+                    "total_tokens": 0,
+                    "wall_time_seconds": wall_time,
+                    "success": False,
+                    "error": f"Logits shape invalid: expected 3D (batch, seq, vocab), got shape {parsed.final_logits.shape}",
+                    "error_code": "invalid_logits_shape",
+                    "seed": seed,
+                    "code": code,
+                }
+
+            logits_seq_len = parsed.final_logits.shape[1]
+
+            # SECURITY: Verify sequence length - miner can't truncate sequences
+            if logits_seq_len != expected_seq_len:
+                return {
+                    "task_id": task_id,
+                    "mfu": 0.0,
+                    "tps": 0.0,
+                    "total_tokens": 0,
+                    "wall_time_seconds": wall_time,
+                    "success": False,
+                    "error": f"Sequence length mismatch (possible truncation): expected {expected_seq_len}, got {logits_seq_len}",
+                    "error_code": "sequence_truncation",
+                    "seed": seed,
+                    "code": code,
+                }
+            logger.info(f"[PASSED] Sequence length check: {logits_seq_len} == {expected_seq_len}")
+
+            # =================================================================
             # PARAMS CHANGED CHECK - Verify miner actually trained the model
             # =================================================================
             # SECURITY: This catches the "freeze layers then restore requires_grad" attack.
@@ -1398,8 +1500,8 @@ class Actor:
                 gradient_norm_ratio_max=gradient_norm_ratio_max,
             )
 
-            # Calculate MFU and TPS
-            total_tokens_int = int(parsed.total_tokens)
+            # This ensures miner can't inflate MFU by reporting higher token counts
+            total_tokens_int = expected_tokens  # Validator knows exact expected count
             tps = float(total_tokens_int) / max(wall_time, 1e-6)
             mfu = _calculate_mfu(total_tokens_int, wall_time, model_params, gpu_peak_tflops)
 
@@ -1506,7 +1608,7 @@ class EvaluateRequest(BaseModel):
     # Gradient verification
     gradient_cosine_min: float = 0.8
     gradient_norm_ratio_min: float = 0.5
-    gradient_norm_ratio_max: float = 2.0
+    gradient_norm_ratio_max: float = 1.02
     # MFU calculation
     gpu_peak_tflops: float = 312.0
 
@@ -1521,6 +1623,7 @@ class EvaluateResponse(BaseModel):
     wall_time_seconds: float
     success: bool
     error: str | None = None
+    error_code: str | None = None
     seed: str
     diagnostics: dict = {}
 
@@ -1572,6 +1675,7 @@ async def evaluate(request: EvaluateRequest) -> EvaluateResponse:
         wall_time_seconds=result.get("wall_time_seconds", 0.0),
         success=result.get("success", False),
         error=result.get("error"),
+        error_code=result.get("error_code"),
         seed=result.get("seed", request.seed),
         diagnostics=result.get("diagnostics", {}),
     )

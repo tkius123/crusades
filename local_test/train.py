@@ -1,10 +1,31 @@
 """
-Basic training implementation - Miners can optimize this!
+Reference training implementation for Templar Crusades.
+
+This is the baseline implementation. Miners should optimize it for maximum MFU
+(Model FLOPs Utilization) while passing all verification checks.
 
 Usage:
     1. Run setup: uv run local_test/setup_benchmark.py
     2. Test locally: uv run local_test/train.py
     3. Submit when ready!
+
+=== VERIFICATION RULES ===
+
+Your inner_steps function MUST:
+  - Use the provided optimizer (call optimizer.step() and optimizer.zero_grad())
+  - Process ALL tokens in each batch (no truncation)
+  - Return actual final_logits tensor (not None)
+  - Return logits with correct shape: (batch_size, seq_len - 1, vocab_size)
+  - Produce gradients that closely match the reference implementation
+  - Train all model parameters (don't freeze layers)
+  - Call optimizer.step() for each training step
+
+Your inner_steps function MUST NOT:
+  - Access optimizer internals (e.g., optimizer.optimizer)
+  - Truncate or skip parts of input sequences
+  - Return None for final_logits
+  - Report inflated token counts
+  - Modify the model's requires_grad settings
 """
 
 import json
@@ -19,7 +40,13 @@ from transformers import AutoModelForCausalLM
 
 @dataclass
 class InnerStepsResult:
-    """Required return type from inner_steps function."""
+    """Required return type from inner_steps function.
+
+    All fields are verified by the validator:
+    - final_logits: Must be a 3D tensor (batch, seq_len-1, vocab), NOT None
+    - total_tokens: Should equal batch_size * seq_len * num_steps
+    - final_loss: Must be a positive float, close to reference loss
+    """
 
     final_logits: torch.Tensor  # Output logits from last forward pass
     total_tokens: int  # Total tokens processed across all steps
@@ -30,12 +57,17 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     """
     Run training steps and return results.
 
-    Args:
-        model: Pre-loaded model (already on device, in train mode)
-        data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
-        optimizer: Pre-configured optimizer
-        num_steps: Number of training steps to run
-        device: Target device (cuda or cpu)
+    This is the function the validator calls. It receives:
+    - model: Pre-loaded model (already on device, in train mode, with gradient checkpointing)
+    - data_iterator: Infinite iterator yielding batches of shape (batch_size, seq_len)
+    - optimizer: Pre-configured AdamW optimizer (wrapped by validator for gradient capture)
+    - num_steps: Number of training steps to run (must complete all of them)
+    - device: Target device (cuda or cpu)
+
+    The validator measures wall_time of this function and calculates:
+        MFU = (6 * model_params * batch_size * seq_len * num_steps) / (wall_time * gpu_peak_tflops)
+
+    Higher MFU = you completed the same training faster = better score.
 
     Returns:
         InnerStepsResult with outputs for verification
@@ -45,11 +77,12 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     final_loss = 0.0
 
     for step in range(num_steps):
-        # Get batch
+        # Get batch - shape: (batch_size, seq_len)
         batch = next(data_iterator)
         batch = batch.to(device)
 
-        # Prepare inputs and labels
+        # Prepare inputs and labels (causal LM: predict next token)
+        # input_ids: all tokens except last, labels: all tokens except first
         input_ids = batch[:, :-1]
         labels = batch[:, 1:]
 
@@ -67,12 +100,13 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         # Backward pass
         loss.backward()
 
-        # Update weights
+        # Update weights - MUST use the provided optimizer
         optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # Track metrics
         total_tokens += batch.numel()
+        # Keep logits from the last step for verification
         final_logits = logits.detach().float()
         final_loss = loss.item()
 

@@ -109,6 +109,22 @@ class EvaluationResult:
         except ValueError:
             return True
 
+    def is_fatal(self) -> bool:
+        """Check if this error is fatal/deterministic (no point retrying).
+
+        Fatal errors will fail the same way on every retry because
+        they are caused by the miner's code logic, not transient issues.
+        """
+        if self.success:
+            return False
+        if not self.error_code:
+            return False  # Unknown error, worth retrying
+        try:
+            code = EvaluationErrorCode(self.error_code)
+            return EvaluationErrorCode.is_fatal(code)
+        except ValueError:
+            return False  # Unknown code, worth retrying
+
 
 class AffinetesRunner:
     """Runs evaluations via Docker or Basilica.
@@ -674,7 +690,7 @@ asyncio.run(main())
                 try:
                     health_response = await client.get(f"{deployment.url}/health")
                     if health_response.status_code == 200:
-                        logger.info("[BASILICA] Health check: ✅ OK")
+                        logger.info("[BASILICA] Health check: OK")
                     else:
                         logger.warning(f"[BASILICA] Health check: {health_response.status_code}")
                 except Exception as e:
@@ -814,7 +830,7 @@ asyncio.run(main())
             )
 
             deploy_time = time.time() - deploy_start
-            logger.info(f"[BASILICA] ✅ Deployment created in {deploy_time:.1f}s!")
+            logger.info(f"[BASILICA] Deployment created in {deploy_time:.1f}s")
             logger.info(f"   Deployment URL: {deployment.url}")
             if hasattr(deployment, "id"):
                 logger.info(f"   Deployment ID: {deployment.id}")
@@ -829,7 +845,7 @@ asyncio.run(main())
             return deployment
 
         except Exception as e:
-            logger.error("[BASILICA] ❌ Failed to deploy!")
+            logger.error("[BASILICA] Failed to deploy!")
             logger.error(f"   Error: {e}")
             logger.error(traceback.format_exc())
             return None

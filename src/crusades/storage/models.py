@@ -110,7 +110,7 @@ class AdaptiveThresholdModel(Base):
     """Database model for adaptive leaderboard threshold.
 
     The threshold adapts based on improvement magnitude:
-    - Big improvements (e.g., 24% → 48%) create a high threshold
+    - Big improvements (e.g., 24% -> 48%) create a high threshold
     - Threshold decays over time towards base_threshold
     - This rewards big jumps and prevents gaming
     """

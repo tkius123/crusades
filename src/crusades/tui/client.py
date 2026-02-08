@@ -187,9 +187,17 @@ class DatabaseClient:
         # Get defaults from hparams
         hparams = get_hparams()
         threshold_config = hparams.adaptive_threshold
-        base_threshold = base_threshold if base_threshold is not None else threshold_config.base_threshold
-        decay_percent = decay_percent if decay_percent is not None else threshold_config.decay_percent
-        decay_interval_blocks = decay_interval_blocks if decay_interval_blocks is not None else threshold_config.decay_interval_blocks
+        base_threshold = (
+            base_threshold if base_threshold is not None else threshold_config.base_threshold
+        )
+        decay_percent = (
+            decay_percent if decay_percent is not None else threshold_config.decay_percent
+        )
+        decay_interval_blocks = (
+            decay_interval_blocks
+            if decay_interval_blocks is not None
+            else threshold_config.decay_interval_blocks
+        )
         block_time = block_time if block_time is not None else hparams.block_time
         try:
             row = self._query_one(
@@ -231,7 +239,7 @@ class DatabaseClient:
             elapsed_seconds = (now - updated_at).total_seconds()
             # Clamp to non-negative to prevent decay_factor > 1.0 from clock skew
             elapsed_seconds = max(0, elapsed_seconds)
-            
+
             # Guard against misconfigured intervals (avoid division by zero)
             if block_time <= 0 or decay_interval_blocks <= 0:
                 decayed = current_threshold
@@ -474,29 +482,33 @@ class DatabaseClient:
             # Find winner's full data from rows
             winner_row = next((r for r in rows if r["submission_id"] == winner_id), None)
             if winner_row:
-                leaderboard.append({
-                    "rank": 1,
-                    "submission_id": winner_row["submission_id"],
-                    "miner_hotkey": winner_row["miner_hotkey"],
-                    "miner_uid": winner_row["miner_uid"],
-                    "final_score": winner_row["final_score"] or 0.0,
-                    "num_evaluations": winner_row["eval_count"],
-                    "created_at": winner_row["created_at"],
-                })
+                leaderboard.append(
+                    {
+                        "rank": 1,
+                        "submission_id": winner_row["submission_id"],
+                        "miner_hotkey": winner_row["miner_hotkey"],
+                        "miner_uid": winner_row["miner_uid"],
+                        "final_score": winner_row["final_score"] or 0.0,
+                        "num_evaluations": winner_row["eval_count"],
+                        "created_at": winner_row["created_at"],
+                    }
+                )
 
         # Add remaining submissions (excluding winner) sorted by raw score
         rank = 2 if winner else 1
         for row in rows:
             if row["submission_id"] != winner_id:
-                leaderboard.append({
-                    "rank": rank,
-                    "submission_id": row["submission_id"],
-                    "miner_hotkey": row["miner_hotkey"],
-                    "miner_uid": row["miner_uid"],
-                    "final_score": row["final_score"] or 0.0,
-                    "num_evaluations": row["eval_count"],
-                    "created_at": row["created_at"],
-                })
+                leaderboard.append(
+                    {
+                        "rank": rank,
+                        "submission_id": row["submission_id"],
+                        "miner_hotkey": row["miner_hotkey"],
+                        "miner_uid": row["miner_uid"],
+                        "final_score": row["final_score"] or 0.0,
+                        "num_evaluations": row["eval_count"],
+                        "created_at": row["created_at"],
+                    }
+                )
                 rank += 1
                 if len(leaderboard) >= limit:
                     break

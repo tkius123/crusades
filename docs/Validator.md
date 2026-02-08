@@ -57,9 +57,10 @@ The primary metric for ranking miners:
 MFU = (actual_tflops / gpu_peak_tflops) * 100
 
 Where:
-- actual_tflops = model_flops * total_tokens / wall_time / 1e12
-- model_flops = 6 * model_params * seq_len (approximate)
-- gpu_peak_tflops = 312.0 for A100 (from hparams)
+- actual_tflops = (6 * model_params * total_tokens) / wall_time / 1e12
+- total_tokens = batch_size * seq_len * steps
+- 6 = forward (2x) + backward (4x) FLOPs per param per token
+- gpu_peak_tflops = 312.0 for A100 bfloat16 (from hparams)
 ```
 
 Higher MFU = more efficient use of GPU compute.
@@ -70,11 +71,14 @@ Each submission is verified to prevent cheating:
 
 | Check | Description | Threshold |
 |-------|-------------|-----------|
-| **Loss Validity** | Loss must be valid (not NaN, not too high) | `max_loss_difference: 0.3` |
-| **Gradient Cosine** | Gradients must align with reference | `gradient_cosine_min: 0.95` |
-| **Gradient Norm** | Gradient magnitudes must be reasonable | `0.9 - 1.1` ratio |
+| **Logits Present** | Must return actual logits (not None) | Required |
+| **Logits Shape** | Logits must be 3D (batch, seq, vocab) | Required |
+| **Sequence Length** | Logits seq dim must match expected | `seq_len - 1` |
+| **Loss Validity** | Loss must be positive, not NaN, close to reference | `max_loss_difference: 0.3` |
+| **Gradient Relative Error** | `\|g - g_truth\| / \|g_truth\|` must be small | `gradient_norm_ratio_max - 1.0` |
+| **Gradient Coverage** | All layers must have gradients | `100%` |
 | **Trainable Params** | All params must be trainable | `100%` |
-| **Params Changed** | Most params must change during training | `min: 80%` |
+| **Params Changed** | Most param elements must change during training | `min: 80%` |
 | **Success Rate** | Majority of runs must pass | `min_success_rate: 0.5` |
 
 ### Adaptive Threshold & Leaderboard
@@ -91,7 +95,7 @@ Example:
 ```
 
 **Threshold behavior:**
-- **Increases** when a new leader makes a big improvement (e.g., 45% → 60% = 33% improvement → threshold becomes 33%)
+- **Increases** when a new leader makes a big improvement (e.g., 45% -> 60% = 33% improvement -> threshold becomes 33%)
 - **Decays** over time towards base (1%) to allow catching up
 
 ### Weight Distribution
@@ -128,8 +132,8 @@ uv run -m neurons.validator \
 
 ```bash
 # 1. Build and push image to registry (from repo root)
-docker build --network=host -f environments/templar/Dockerfile -t ghcr.io/one-covenant/templar-eval:latest .
-docker push ghcr.io/one-covenant/templar-eval:latest
+docker build --network=host -f environments/templar/Dockerfile -t ghcr.io/YOUR_ORG/templar-eval:latest .
+docker push ghcr.io/YOUR_ORG/templar-eval:latest
 
 # 2. Run validator (no local GPU needed!)
 SUBTENSOR_NETWORK=finney \
@@ -281,16 +285,16 @@ Contact the Basilica team to get your `BASILICA_API_TOKEN`.
 
 ```bash
 # Build the evaluation image (from repo root)
-docker build --network=host -f environments/templar/Dockerfile -t ghcr.io/one-covenant/templar-eval:latest .
+docker build --network=host -f environments/templar/Dockerfile -t ghcr.io/YOUR_ORG/templar-eval:latest .
 
 # Login to GitHub Container Registry
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image (must be PUBLIC for Basilica to pull)
-docker push ghcr.io/one-covenant/templar-eval:latest
+docker push ghcr.io/YOUR_ORG/templar-eval:latest
 ```
 
-> ⚠️ **Important**: The image must be **public** in ghcr.io settings for Basilica to pull it.
+> **Important**: The image must be **public** in ghcr.io settings for Basilica to pull it.
 
 ### Step 3: Configure hparams.json
 
@@ -300,7 +304,7 @@ Edit `hparams/hparams.json`:
 {
     "netuid": 3,
     "basilica": {
-        "image": "ghcr.io/one-covenant/templar-eval:latest",
+        "image": "ghcr.io/YOUR_ORG/templar-eval:latest",
         "ttl_seconds": 3600,
         "gpu_count": 1,
         "gpu_models": ["A100"],
@@ -317,7 +321,7 @@ Edit `hparams/hparams.json`:
 | `ttl_seconds` | Deployment lifetime | 3600 (1 hour) |
 | `gpu_count` | Number of GPUs | 1 |
 | `gpu_models` | Acceptable GPU types | ["A100"] |
-| `min_gpu_memory_gb` | Minimum VRAM | 64 |
+| `min_gpu_memory_gb` | Minimum VRAM | 80 |
 
 ### Step 4: Run Validator
 

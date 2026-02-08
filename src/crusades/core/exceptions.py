@@ -23,6 +23,10 @@ class EvaluationErrorCode(StrEnum):
     GRADIENT_COSINE_FAILED = "gradient_cosine_failed"
     LOSS_MISMATCH = "loss_mismatch"
     TOKEN_COUNT_MISMATCH = "token_count_mismatch"
+    NO_GRADIENTS_CAPTURED = "no_gradients_captured"
+    MISSING_LOGITS = "missing_logits"
+    INVALID_LOGITS_SHAPE = "invalid_logits_shape"
+    SEQUENCE_TRUNCATION = "sequence_truncation"
 
     # Runtime errors
     TIMEOUT = "timeout"
@@ -49,6 +53,39 @@ class EvaluationErrorCode(StrEnum):
             cls.GRADIENT_COSINE_FAILED,
             cls.LOSS_MISMATCH,
             cls.TOKEN_COUNT_MISMATCH,
+            cls.NO_GRADIENTS_CAPTURED,
+            cls.MISSING_LOGITS,
+            cls.INVALID_LOGITS_SHAPE,
+            cls.SEQUENCE_TRUNCATION,
+        }
+
+    @classmethod
+    def is_fatal(cls, code: "EvaluationErrorCode") -> bool:
+        """Check if error is fatal/deterministic (no point retrying).
+
+        Only includes checks that are determined by the miner's CODE, not
+        by the random seed/data. Data-dependent checks (gradient error,
+        params changed, loss) can vary between runs and should be retried.
+        """
+        return code in {
+            # Code validation errors - code won't magically fix itself
+            cls.NO_CODE,
+            cls.SYNTAX_ERROR,
+            cls.MISSING_INNER_STEPS,
+            cls.INVALID_RETURN_TYPE,
+            # Code-level security checks - deterministic regardless of data
+            cls.INSUFFICIENT_TRAINABLE_PARAMS,  # Code freezes layers or not
+            cls.NO_GRADIENTS_CAPTURED,  # Code calls optimizer.step() or not
+            cls.MISSING_LOGITS,  # Code returns None or not
+            cls.INVALID_LOGITS_SHAPE,  # Code returns wrong shape or not
+            cls.SEQUENCE_TRUNCATION,  # Code truncates or not
+            # NOT fatal (data-dependent, can vary between seeds):
+            # - INSUFFICIENT_PARAMS_CHANGED (borderline with few steps)
+            # - GRADIENT_NORM_RATIO_FAILED (varies with data)
+            # - GRADIENT_COSINE_FAILED (varies with data)
+            # - GRADIENT_COVERAGE_FAILED (borderline)
+            # - LOSS_MISMATCH (varies with data)
+            # - TOKEN_COUNT_MISMATCH (should be deterministic but edge cases)
         }
 
     @classmethod

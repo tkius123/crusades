@@ -20,9 +20,7 @@ from typing import Final
 import logging_loki
 
 # Default Loki URL - same as Templar
-LOKI_URL: Final[str] = os.environ.get(
-    "LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push"
-)
+LOKI_URL: Final[str] = os.environ.get("LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push")
 TRACE_ID: Final[str] = str(uuid.uuid4())
 
 # Only enable Loki if explicitly set (prevents local runs from polluting prod logs)
@@ -61,9 +59,7 @@ def setup_loki_logger(
     # Console handler (always enabled) - use UTC for consistency with Grafana
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        "%(asctime)s UTC | %(levelname)s | %(name)s | %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s UTC | %(levelname)s | %(name)s | %(message)s")
     formatter.converter = time.gmtime  # Force UTC
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
@@ -93,9 +89,7 @@ def setup_loki_logger(
     # Use queue-based handler for async logging (non-blocking)
     log_queue: Queue = Queue(-1)
     queue_handler = logging.handlers.QueueHandler(log_queue)
-    listener = logging.handlers.QueueListener(
-        log_queue, respect_handler_level=True
-    )
+    listener = logging.handlers.QueueListener(log_queue, respect_handler_level=True)
 
     # Loki handler
     loki_handler = logging_loki.LokiHandler(

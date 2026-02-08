@@ -39,10 +39,9 @@ class WeightSetter:
         self.burn_rate = self.hparams.burn_rate  # e.g., 0.95 = 95% to validator
         self.burn_uid = self.hparams.burn_uid  # UID that receives burn portion
 
-        # Track previous winner to detect changes (persisted to DB for restart resilience)
+        # Track previous winner to detect changes (loaded from DB each cycle)
         self._previous_winner_id: str | None = None
         self._previous_winner_score: float = 0.0
-        self._initialized: bool = False
 
     async def _load_previous_winner(self) -> None:
         """Load previous winner info from database (for restart resilience)."""
@@ -130,20 +129,19 @@ class WeightSetter:
 
         winner_score = winner.final_score or 0.0
 
-        # Initialize tracking on first call - load from DB for restart resilience
-        if not self._initialized:
-            self._initialized = True
-            await self._load_previous_winner()
-            
-            # If no previous winner in DB, initialize with current winner
-            if self._previous_winner_id is None:
-                self._previous_winner_id = winner.submission_id
-                self._previous_winner_score = winner_score
-                await self._save_previous_winner(winner.submission_id, winner_score)
-                logger.info(
-                    f"Initialized winner tracking (first time): "
-                    f"{self._previous_winner_id} ({self._previous_winner_score:.2f}% MFU)"
-                )
+        # Always load previous winner from DB to stay in sync with
+        # immediate threshold updates from validator._check_and_update_threshold_if_new_leader()
+        await self._load_previous_winner()
+
+        # If no previous winner in DB, initialize with current winner
+        if self._previous_winner_id is None:
+            self._previous_winner_id = winner.submission_id
+            self._previous_winner_score = winner_score
+            await self._save_previous_winner(winner.submission_id, winner_score)
+            logger.info(
+                f"Initialized winner tracking (first time): "
+                f"{self._previous_winner_id} ({self._previous_winner_score:.2f}% MFU)"
+            )
 
         # Check if winner changed - if so, update adaptive threshold
         if winner.submission_id != self._previous_winner_id:

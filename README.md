@@ -1,6 +1,6 @@
 # Templar Crusades
 
-**TPS Crusades on Bittensor** - Miners compete to optimize training code for maximum MFU.
+**MFU Crusades on Bittensor** - Miners compete to optimize training code for maximum MFU (Model FLOPs Utilization).
 
 ## How It Works
 
@@ -102,7 +102,7 @@ See [docs/Validator.md](docs/Validator.md) for detailed validator setup.
 
 ## train.py Requirements
 
-Your `train.py` must implement the `inner_steps` function. Here's the basic implementation:
+Your `train.py` must implement the `inner_steps` function. Here's the baseline:
 
 ```python
 from dataclasses import dataclass
@@ -111,60 +111,39 @@ import torch.nn.functional as F
 
 @dataclass
 class InnerStepsResult:
-    final_logits: torch.Tensor  # Output logits from last forward pass
+    final_logits: torch.Tensor  # Must be 3D: (batch, seq_len-1, vocab) - NOT None
     total_tokens: int           # Total tokens processed across all steps
-    final_loss: float           # Loss value from last training step
+    final_loss: float           # Loss value from last training step (must be > 0)
 
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
-    """
-    Run training steps and return results.
-    
-    Args:
-        model: Pre-loaded model (already on device, in train mode)
-        data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
-        optimizer: Pre-configured optimizer
-        num_steps: Number of training steps to run
-        device: Target device (cuda or cpu)
-    
-    Returns:
-        InnerStepsResult with outputs for verification
-    """
     total_tokens = 0
     final_logits = None
     final_loss = 0.0
-    
+
     for step in range(num_steps):
-        # Get batch
         batch = next(data_iterator)
         batch = batch.to(device)
-        
-        # Prepare inputs and labels
-        input_ids = batch[:, :-1]
-        labels = batch[:, 1:]
-        
-        # Forward pass
+
+        input_ids = batch[:, :-1]   # All tokens except last
+        labels = batch[:, 1:]       # All tokens except first
+
         outputs = model(input_ids)
         logits = outputs.logits if hasattr(outputs, "logits") else outputs
-        
-        # Compute loss
+
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
             labels.reshape(-1),
             ignore_index=-100,
         )
-        
-        # Backward pass
+
         loss.backward()
-        
-        # Update weights
         optimizer.step()
-        optimizer.zero_grad()
-        
-        # Track metrics
+        optimizer.zero_grad(set_to_none=True)
+
         total_tokens += batch.numel()
         final_logits = logits.detach().float()
         final_loss = loss.item()
-    
+
     return InnerStepsResult(
         final_logits=final_logits,
         total_tokens=total_tokens,
@@ -172,7 +151,18 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     )
 ```
 
-This is a basic implementation - miners should optimize it for better performance.
+### Rules
+
+**You MUST:**
+- Use the provided `optimizer` directly (call `optimizer.step()` and `optimizer.zero_grad()`)
+- Process ALL tokens in each batch (no truncation)
+- Return actual `final_logits` tensor (not `None`)
+- Train all model parameters (don't freeze layers)
+
+**You MUST NOT:**
+- Access optimizer internals (e.g., `optimizer.optimizer`)
+- Truncate or skip parts of input sequences
+- Return `None` for `final_logits`
 
 ---
 
