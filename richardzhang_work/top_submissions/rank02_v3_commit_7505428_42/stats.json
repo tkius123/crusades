@@ -1,0 +1,90 @@
+{
+  "rank": 2,
+  "leaderboard_entry": {
+    "rank": 2,
+    "submission_id": "v3_commit_7505428_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "final_score": 45.56464795197573,
+    "num_evaluations": 5,
+    "created_at": "2026-02-09 09:52:46.667636"
+  },
+  "submission_detail": {
+    "submission_id": "v3_commit_7505428_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "code_hash": "https://gist.githubusercontent.com/tkius123/0b254c7b960b4ec86875c8739ff30ccd/raw/b9c81664572a88a31d3bfacdf380f59134e87935/train.py",
+    "bucket_path": "https://gist.githubusercontent.com/tkius123/0b254c7b960b4ec86875c8739ff30ccd/raw/b9c81664572a88a31d3bfacdf380f59134e87935/train.py",
+    "spec_version": 3,
+    "status": "finished",
+    "created_at": "2026-02-09 09:52:46.667636",
+    "updated_at": "2026-02-09 10:11:10.090284",
+    "final_score": 45.56464795197573,
+    "error_message": null,
+    "code_content": "\"\"\"\nt01 \u2014 UID 79 clone: compiled step fn + grad_ckpt off + fused AdamW\nFull reproduction of rank 1 approach.\n\"\"\"\n\nimport gc\nimport os\nfrom dataclasses import dataclass\n\nimport torch\nimport torch.nn.functional as F\n\n\n@dataclass\nclass InnerStepsResult:\n    final_logits: torch.Tensor\n    total_tokens: int\n    final_loss: float\n\n\n_initialized = False\n_train_fn = None\n\n\ndef inner_steps(model, data_iterator, optimizer, num_steps, device):\n    global _initialized, _train_fn\n\n    is_cuda = str(device).startswith(\"cuda\")\n\n    # ONE-TIME INIT\n    if not _initialized:\n        _initialized = True\n\n        if is_cuda:\n            os.environ.setdefault(\"PYTORCH_CUDA_ALLOC_CONF\", \"expandable_segments:True\")\n            torch.set_float32_matmul_precision(\"high\")\n            torch.backends.cuda.matmul.allow_tf32 = True\n            torch.backends.cudnn.allow_tf32 = True\n            torch.backends.cudnn.benchmark = True\n            torch.backends.cudnn.deterministic = False\n            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True\n\n            torch.backends.cuda.enable_flash_sdp(True)\n            torch.backends.cuda.enable_mem_efficient_sdp(True)\n            torch.backends.cuda.enable_math_sdp(False)\n\n            # Free stale optimizers (~24GB VRAM)\n            for obj in gc.get_objects():\n                if isinstance(obj, torch.optim.Optimizer) and obj is not optimizer:\n                    obj.state.clear()\n            gc.collect()\n            torch.cuda.empty_cache()\n\n    # PER-CALL\n    if hasattr(model, \"config\"):\n        model.config.use_cache = False\n    if hasattr(model, \"gradient_checkpointing_disable\"):\n        model.gradient_checkpointing_disable()\n\n    if is_cuda:\n        try:\n            for group in optimizer.param_groups:\n                if not group.get(\"fused\", False):\n                    group[\"fused\"] = True\n                    group[\"foreach\"] = False\n        except Exception:\n            pass\n\n    # COMPILED STEP FN (forward + loss + backward)\n    if _train_fn is None:\n        dev_type = device.type\n\n        def _eager_step(input_ids, labels):\n            with torch.autocast(device_type=dev_type, dtype=torch.bfloat16):\n                logits = model(input_ids).logits\n                loss = F.cross_entropy(\n                    logits.view(-1, logits.size(-1)),\n                    labels.reshape(-1),\n                    ignore_index=-100,\n                )\n            loss.backward()\n            return loss.detach(), logits.detach()\n\n        if is_cuda:\n            try:\n                _train_fn = torch.compile(\n                    _eager_step,\n                    mode=\"reduce-overhead\",\n                    fullgraph=False,\n                )\n            except Exception:\n                _train_fn = _eager_step\n        else:\n            _train_fn = _eager_step\n\n    # PREFETCH\n    if is_cuda:\n        pf_stream = torch.cuda.Stream()\n        with torch.cuda.stream(pf_stream):\n            next_batch = next(data_iterator).to(device, non_blocking=True)\n    else:\n        next_batch = next(data_iterator).to(device)\n\n    # TRAINING LOOP\n    total_tokens = 0\n    final_loss = 0.0\n    final_logits = None\n\n    for step in range(num_steps):\n        if is_cuda:\n            torch.cuda.current_stream().wait_stream(pf_stream)\n        batch = next_batch\n\n        if step < num_steps - 1:\n            nb = next(data_iterator)\n            if is_cuda:\n                with torch.cuda.stream(pf_stream):\n                    next_batch = nb.to(device, non_blocking=True)\n            else:\n                next_batch = nb.to(device)\n\n        loss, logits = _train_fn(batch[:, :-1], batch[:, 1:])\n\n        optimizer.step()\n        optimizer.zero_grad(set_to_none=True)\n\n        total_tokens += batch.numel()\n        if step == num_steps - 1:\n            final_loss = loss.item()\n            final_logits = logits.float()\n\n    return InnerStepsResult(\n        final_logits=final_logits,\n        total_tokens=total_tokens,\n        final_loss=final_loss,\n    )\n\n\nif __name__ == \"__main__\":\n    import json\n    import time\n    from pathlib import Path\n    from transformers import AutoModelForCausalLM\n\n    print(\"t01 \u2014 UID 79 clone: compiled step fn + grad_ckpt off + fused AdamW\")\n\n    hparams_path = Path(__file__).parent.parent / \"hparams\" / \"hparams.json\"\n    hparams = {}\n    if hparams_path.exists():\n        with open(hparams_path) as f:\n            hparams = json.load(f)\n\n    batch_size = hparams.get(\"benchmark_batch_size\", 16)\n    num_steps = hparams.get(\"eval_steps\", 5)\n    num_evals = hparams.get(\"evaluation_runs\", 5)\n\n    project_root = Path(__file__).parent.parent\n    model_path = project_root / \"benchmark\" / \"model\"\n    data_path = project_root / \"benchmark\" / \"data\" / \"train.pt\"\n\n    if not model_path.exists() or not data_path.exists():\n        print(\"Setup required! Run: uv run local_test/setup_benchmark.py\")\n        exit(1)\n\n    device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n    print(f\"Device: {device}\")\n\n    model = AutoModelForCausalLM.from_pretrained(\n        model_path, torch_dtype=torch.bfloat16, device_map=\"auto\", trust_remote_code=True,\n    )\n    model.gradient_checkpointing_enable()\n    model.train()\n\n    data = torch.load(data_path, weights_only=True)\n    if torch.cuda.is_available():\n        data = data.pin_memory()\n\n    def create_iterator():\n        idx = 0\n        while True:\n            end_idx = idx + batch_size\n            if end_idx > data.shape[0]:\n                idx = 0\n                end_idx = batch_size\n            yield data[idx:end_idx]\n            idx = end_idx\n\n    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)\n\n    print(\"Warmup...\")\n    _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)\n    if torch.cuda.is_available():\n        torch.cuda.synchronize()\n        torch.cuda.empty_cache()\n\n    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)\n\n    print(f\"Running {num_evals} evaluations...\")\n    wall_times = []\n    for i in range(num_evals):\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n        start = time.perf_counter()\n        result = inner_steps(model, create_iterator(), optimizer, num_steps, device)\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n        elapsed = time.perf_counter() - start\n        wall_times.append(elapsed)\n        tps = result.total_tokens / elapsed\n        print(f\"  Eval {i+1}: {elapsed:.3f}s | TPS={tps:,.0f} | loss={result.final_loss:.4f}\")\n\n    median_time = sorted(wall_times)[len(wall_times) // 2]\n    median_tps = result.total_tokens / median_time\n    print(f\"\\nMedian: {median_time:.4f}s | TPS={median_tps:,.0f}\")\n    print(\"Done!\")\n",
+    "payment_verified": 1
+  },
+  "evaluations": [
+    {
+      "evaluation_id": "e5c0d98b-8c6e-4085-a8b8-ee77945039e8",
+      "submission_id": "v3_commit_7505428_42",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 44.77471191565458,
+      "tokens_per_second": 7544.819437495052,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.71444534487091,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-09 09:55:55.664805"
+    },
+    {
+      "evaluation_id": "a6960e29-267a-423d-885e-cc9aa8505012",
+      "submission_id": "v3_commit_7505428_42",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 0.0,
+      "tokens_per_second": 0.0,
+      "total_tokens": 0,
+      "wall_time_seconds": 2.6610028980649076,
+      "success": 0,
+      "error": "Gradient relative error 0.051667 exceeds threshold 0.050000 (|g - g_truth| / |g_truth|)",
+      "created_at": "2026-02-09 09:59:51.414731"
+    },
+    {
+      "evaluation_id": "616e4624-55d1-4596-a8b3-c8e0f9a18dd8",
+      "submission_id": "v3_commit_7505428_42",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.56464795197573,
+      "tokens_per_second": 7677.928607967009,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.6673860940500163,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-09 10:03:41.228969"
+    },
+    {
+      "evaluation_id": "a8debbc0-060f-4210-a34b-419d1a06e955",
+      "submission_id": "v3_commit_7505428_42",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 0.0,
+      "tokens_per_second": 0.0,
+      "total_tokens": 0,
+      "wall_time_seconds": 2.65327840304235,
+      "success": 0,
+      "error": "Gradient relative error 0.050435 exceeds threshold 0.050000 (|g - g_truth| / |g_truth|)",
+      "created_at": "2026-02-09 10:08:11.883628"
+    },
+    {
+      "evaluation_id": "5120c9b4-f8c9-45e3-86dd-562ca819939b",
+      "submission_id": "v3_commit_7505428_42",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.91222631607101,
+      "tokens_per_second": 7736.497739632643,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.6471926560625434,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-09 10:11:10.069929"
+    }
+  ],
+  "fetched_at": "2026-02-09T19:50:56.497156"
+}

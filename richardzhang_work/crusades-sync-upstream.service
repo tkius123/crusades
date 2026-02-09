@@ -1,0 +1,22 @@
+[Unit]
+Description=Crusades upstream sync (fetch and merge upstream into main every minute)
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+WorkingDirectory=REPLACE_WORKDIR
+# uv run uses project pyproject.toml; ensure uv is on PATH (e.g. ~/.local/bin)
+Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Optional: override config without editing ExecStart (no code change)
+# Environment="SYNC_UPSTREAM_INTERVAL=120"
+# Environment="SYNC_UPSTREAM_LOG_FILE=/var/log/crusades-sync-upstream.log"
+# Environment="SYNC_UPSTREAM_PUSH=1"
+ExecStart=uv run python REPLACE_WORKDIR/richardzhang_work/sync_upstream.py --service --interval 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

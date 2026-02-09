@@ -1,0 +1,22 @@
+[Unit]
+Description=Crusades top submissions fetcher (periodically fetch leaderboard + source code)
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+WorkingDirectory=REPLACE_WORKDIR
+Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Optional: override config without editing ExecStart
+# Environment="FETCH_SUBS_API_URL=http://69.19.137.219:8080"
+# Environment="FETCH_SUBS_TOP_N=10"
+# Environment="FETCH_SUBS_INTERVAL=300"
+# Environment="FETCH_SUBS_LOG_FILE=/var/log/crusades-fetch-submissions.log"
+ExecStart=uv run python REPLACE_WORKDIR/richardzhang_work/fetch_top_submissions.py --service --interval 300 --top 10
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
