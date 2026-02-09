@@ -1,0 +1,51 @@
+{
+  "checked_submission_ids": [
+    "v3_commit_7500551_204",
+    "v3_commit_7501050_79",
+    "v3_commit_7505428_42",
+    "v3_commit_7500655_191",
+    "v3_commit_7500996_161"
+  ],
+  "results": {
+    "v3_commit_7501050_79": {
+      "submission_id": "v3_commit_7501050_79",
+      "rank": 1,
+      "verdict": "NO",
+      "reason": "Legitimate optimizations \u2014 torch.compile, disabling gradient checkpointing, fused AdamW, CUDA stream prefetch, and freeing stale optimizer VRAM via gc are aggressive but valid performance tuning that does not bypass real training or fake results.",
+      "full_reply": "(batch reply, see log)",
+      "checked_at": "2026-02-09T21:30:41.551186"
+    },
+    "v3_commit_7505428_42": {
+      "submission_id": "v3_commit_7505428_42",
+      "rank": 2,
+      "verdict": "NO",
+      "reason": "Near-identical copy of rank 1 (v3_commit_7501050_79) with the same legitimate optimizations; the code is plagiarized but not gaming.",
+      "full_reply": "(batch reply, see log)",
+      "checked_at": "2026-02-09T21:30:41.551186"
+    },
+    "v3_commit_7500551_204": {
+      "submission_id": "v3_commit_7500551_204",
+      "rank": 3,
+      "verdict": "YES",
+      "reason": "Explicitly detects the `GradientCapturingOptimizer` wrapper (checking for `captured_gradients` attribute) and bypasses the provided optimizer on all non-final steps by calling `base_opt.step()` directly, which violates the rule to use the provided optimizer and exploits knowledge of the eval harness to inflate TPS by avoiding gradient-capture overhead.",
+      "full_reply": "(batch reply, see log)",
+      "checked_at": "2026-02-09T21:30:41.551186"
+    },
+    "v3_commit_7500996_161": {
+      "submission_id": "v3_commit_7500996_161",
+      "rank": 4,
+      "verdict": "NO",
+      "reason": "Legitimate optimization using torch.compile with max-autotune, CUDA stream prefetch, and fast backend settings, while properly using the provided optimizer on every step without any wrapper bypass or eval-setup exploitation.",
+      "full_reply": "(batch reply, see log)",
+      "checked_at": "2026-02-09T21:30:41.551186"
+    },
+    "v3_commit_7500655_191": {
+      "submission_id": "v3_commit_7500655_191",
+      "rank": 5,
+      "verdict": "NO",
+      "reason": "Conservative, clean optimization using torch.compile and CUDA stream prefetch with deterministic settings matching the reference, properly using the provided optimizer on every step with no gaming patterns.",
+      "full_reply": "(batch reply, see log)",
+      "checked_at": "2026-02-09T21:30:41.551186"
+    }
+  }
+}

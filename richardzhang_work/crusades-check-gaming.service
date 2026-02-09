@@ -1,0 +1,26 @@
+[Unit]
+Description=Crusades gaming check (Cursor Agent: classify new top-5 submissions as gaming or not)
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+WorkingDirectory=REPLACE_WORKDIR
+Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Required: CURSOR_API_KEY and CURSOR_REPO
+# Set via env file (do not commit keys):
+#   /etc/crusades/gaming-check.env with:
+#     CURSOR_API_KEY=key-...
+#     CURSOR_REPO=https://github.com/tkius123/crusades
+# Optional overrides:
+# Environment="GAMING_CHECK_INTERVAL=300"
+# Environment="GAMING_CHECK_TOP_N=5"
+# Environment="GAMING_CHECK_LOG_FILE=/var/log/crusades-check-gaming.log"
+ExecStart=uv run python REPLACE_WORKDIR/richardzhang_work/check_gaming.py --service --interval 300 --top 5
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

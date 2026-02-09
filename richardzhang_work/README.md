@@ -202,6 +202,74 @@ top_submissions/
 
 ---
 
+## `check_gaming.py` — classify new top-5 as gaming or not (Cursor Agent)
+
+When new submissions appear in the top 5 (from `top_submissions/`), this script launches a **Cursor Background Agent** (`api.cursor.com/v0/agents`) to analyze the `train.py` and judge whether the code is **gaming** the benchmark or legitimate. Results are stored in `richardzhang_work/gaming_checks/`.
+
+**Prerequisites:**
+
+| Env var | Required | Description |
+|---------|----------|-------------|
+| `CURSOR_API_KEY` | yes | Cursor API token (`key-...`) from [cursor.com/dashboard/integration](https://cursor.com/dashboard/integration) |
+| `CURSOR_REPO` | yes | GitHub repo URL for agent context (e.g. `https://github.com/tkius123/crusades`) |
+
+**One-shot:**
+
+```bash
+cd /root/workspace/crusades
+export CURSOR_API_KEY="key-..."
+export CURSOR_REPO="https://github.com/tkius123/crusades"
+uv run python richardzhang_work/check_gaming.py
+```
+
+**Service (check every 5 min):**
+
+```bash
+export CURSOR_API_KEY="key-..."
+export CURSOR_REPO="https://github.com/tkius123/crusades"
+uv run python richardzhang_work/check_gaming.py --service
+uv run python richardzhang_work/check_gaming.py --service --interval 120 --top 5
+```
+
+**Options:**
+
+| Option | Default | Meaning |
+|--------|---------|--------|
+| `--top N` | `5` | Consider top N submissions. |
+| `--top-submissions-dir` | `richardzhang_work/top_submissions` | Where leaderboard and rank* folders live. |
+| `--gaming-checks-dir` | `richardzhang_work/gaming_checks` | Where state and per-submission results are saved. |
+| `--log-file` | `richardzhang_work/check-gaming.log` | Log file path. |
+| `--service` | off | Run as long-lived process; check every `--interval` seconds. |
+| `--interval` | `300` (5 min) | Check interval. |
+
+**Env overrides:** `GAMING_CHECK_INTERVAL`, `GAMING_CHECK_TOP_N`, `GAMING_CHECK_LOG_FILE`.
+
+**Output in `richardzhang_work/gaming_checks/`:**
+
+- `state.json` — list of checked submission IDs and all results.
+- `<submission_id>.json` — per-submission: `verdict` (YES/NO), `reason`, `full_reply`, `checked_at`, `rank`.
+
+**Install as systemd service:**
+
+1. Create an env file with your Cursor token and repo (do not commit it):
+   ```bash
+   sudo mkdir -p /etc/crusades
+   printf 'CURSOR_API_KEY=key-...\nCURSOR_REPO=https://github.com/tkius123/crusades\n' | sudo tee /etc/crusades/gaming-check.env
+   sudo chmod 600 /etc/crusades/gaming-check.env
+   ```
+2. Run the setup script (it will add `EnvironmentFile` if that file exists):
+   ```bash
+   ./richardzhang_work/setup-check-gaming-service.sh
+   ```
+
+| Command | Purpose |
+|--------|--------|
+| `sudo systemctl status crusades-check-gaming` | Service status |
+| `sudo systemctl restart crusades-check-gaming` | Restart |
+| `sudo journalctl -u crusades-check-gaming -f` | Stream logs |
+
+---
+
 ## Quick reference
 
 | Goal | Command |
@@ -221,3 +289,7 @@ top_submissions/
 | Fetch service status | `sudo systemctl status crusades-fetch-submissions` |
 | Fetch service logs | `sudo journalctl -u crusades-fetch-submissions -f` |
 | View fetched submissions | `ls richardzhang_work/top_submissions/` |
+| Run gaming check once | `CURSOR_API_KEY=key-... CURSOR_REPO=... uv run python richardzhang_work/check_gaming.py` |
+| Run gaming check as service | `uv run python richardzhang_work/check_gaming.py --service` |
+| Install gaming-check service | `./richardzhang_work/setup-check-gaming-service.sh` (set keys in /etc/crusades/gaming-check.env first) |
+| Gaming check results | `ls richardzhang_work/gaming_checks/` |
