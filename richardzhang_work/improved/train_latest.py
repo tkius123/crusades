@@ -8,38 +8,21 @@ import torch.nn.functional as F
 
 @dataclass
 class InnerStepsResult:
-    """Result from inner_steps training loop."""
     final_logits: torch.Tensor
     total_tokens: int
     final_loss: float
 
 
-# Global state — persists across inner_steps calls (warmup + eval)
 _initialized = False
 _train_fn = None
 _pf_stream = None
 
 
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
-    """Optimized training loop for maximum TPS.
-
-    Args:
-        model: HuggingFace model
-        data_iterator: Yields batches of token ids
-        optimizer: Provided optimizer (used directly via .step()/.zero_grad())
-        num_steps: Number of training steps
-        device: CUDA device
-
-    Returns:
-        InnerStepsResult with final_logits, total_tokens, final_loss
-    """
     global _initialized, _train_fn, _pf_stream
 
     is_cuda = str(device).startswith("cuda")
 
-    # =========================================================================
-    # ONE-TIME INIT — runs once across all inner_steps calls
-    # =========================================================================
     if not _initialized:
         _initialized = True
 
@@ -50,41 +33,26 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
-            # SDP backend selection: flash > mem-efficient, disable slow math fallback
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
             torch.backends.cuda.enable_math_sdp(False)
 
-            # Free stale optimizer states from env/verify (~24GB VRAM)
             for obj in gc.get_objects():
                 if isinstance(obj, torch.optim.Optimizer) and obj is not optimizer:
                     obj.state.clear()
             gc.collect()
             torch.cuda.empty_cache()
 
-            # Persistent prefetch stream (avoid recreating each call)
             _pf_stream = torch.cuda.Stream()
 
-            # Inductor tuning for better compiled kernels
-            try:
-                import torch._inductor.config as _ic
-                _ic.coordinate_descent_tuning = True
-                _ic.triton.unique_kernel_names = True
-                _ic.fx_graph_cache = True
-            except Exception:
-                pass
-
-    # =========================================================================
-    # PER-CALL SETUP — lightweight, runs each inner_steps call
-    # =========================================================================
     if hasattr(model, "config"):
         model.config.use_cache = False
 
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
 
-    # Fused optimizer — single CUDA kernel for param update
     if is_cuda:
         try:
             for group in optimizer.param_groups:
@@ -94,9 +62,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         except Exception:
             pass
 
-    # =========================================================================
-    # COMPILED TRAIN STEP — cached globally across calls
-    # =========================================================================
     if _train_fn is None:
         dev_type = device.type if isinstance(device, torch.device) else ("cuda" if is_cuda else "cpu")
 
@@ -117,23 +82,18 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
                     _eager_step,
                     mode="reduce-overhead",
                     fullgraph=False,
+                    dynamic=False,
                 )
             except Exception:
                 _train_fn = _eager_step
         else:
             _train_fn = _eager_step
 
-    # =========================================================================
-    # DISABLE GC DURING TRAINING (prevents GC pauses mid-loop)
-    # =========================================================================
     gc_was_enabled = gc.isenabled()
     if gc_was_enabled:
         gc.disable()
 
     try:
-        # =================================================================
-        # PREFETCH FIRST BATCH
-        # =================================================================
         pf = _pf_stream
         if is_cuda and pf is not None:
             with torch.cuda.stream(pf):
@@ -141,20 +101,15 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         else:
             next_batch = next(data_iterator).to(device)
 
-        # =================================================================
-        # TRAINING LOOP
-        # =================================================================
         total_tokens = 0
         final_loss = 0.0
         final_logits = None
 
         for step in range(num_steps):
-            # Wait for prefetched batch
             if is_cuda and pf is not None:
                 torch.cuda.current_stream().wait_stream(pf)
             batch = next_batch
 
-            # Prefetch next batch (overlaps with forward+backward+optimizer)
             if step < num_steps - 1:
                 nb = next(data_iterator)
                 if is_cuda and pf is not None:
@@ -163,17 +118,13 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
                 else:
                     next_batch = nb.to(device)
 
-            # Forward + loss + backward (compiled)
             loss, logits = _train_fn(batch[:, :-1], batch[:, 1:])
 
-            # Optimizer step — uses provided optimizer directly
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-            # Track tokens
             total_tokens += batch.numel()
 
-            # Extract final metrics on last step only (avoids CPU-sync overhead)
             if step == num_steps - 1:
                 final_loss = loss.item()
                 final_logits = logits.float()
@@ -189,9 +140,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     )
 
 
-# =============================================================================
-# LOCAL TESTING
-# =============================================================================
 if __name__ == "__main__":
     import json
     import time
@@ -200,7 +148,7 @@ if __name__ == "__main__":
     from transformers import AutoModelForCausalLM
 
     print("=" * 60)
-    print("TESTING train.py — Optimized (compiled step + prefetch + GC)")
+    print("TESTING train.py")
     print("=" * 60)
     print()
 
