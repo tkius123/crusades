@@ -85,7 +85,7 @@ Below is the current #1 honest submission (not gaming). Use it as the base and i
 {top_code}
 
 Your reply must be ONLY the complete improved train.py Python code.
-No explanation. No markdown fences. No commentary. Just the raw Python code starting with imports.
+No explanation. No markdown fences. No commentary. No comments in the code. Just the raw Python code starting with imports.
 """
 
 
@@ -170,7 +170,7 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
 # ── Helpers ──────────────────────────────────────────────────
 
 def get_previous_result_section(output_dir: Path) -> str:
-    """Load the most recent submission result and its code for feedback in the prompt."""
+    """Find the most recent submission with an eval result and include it in the prompt."""
     submissions_path = output_dir / "submissions.json"
     if not submissions_path.exists():
         return ""
@@ -181,26 +181,36 @@ def get_previous_result_section(output_dir: Path) -> str:
     if not submissions:
         return ""
 
-    last = submissions[-1]
-    status = last.get("status", "unknown")
-    mfu = last.get("mfu")
-    code_file = last.get("code_file", "")
-    error = last.get("error", "")
+    # Find the most recent entry that has an actual eval result (finished or failed_*)
+    evaluated = None
+    for entry in reversed(submissions):
+        s = entry.get("status", "")
+        if s and (s == "finished" or "failed" in s.lower()):
+            evaluated = entry
+            break
 
-    lines = ["IMPORTANT — Your previous submission result:"]
+    if not evaluated:
+        return ""
+
+    status = evaluated.get("status", "")
+    mfu = evaluated.get("mfu")
+    code_file = evaluated.get("code_file", "")
+    error = evaluated.get("error", "")
+    uid = evaluated.get("uid", "?")
+
+    lines = [f"IMPORTANT — Most recent evaluated submission (UID {uid}):"]
     lines.append(f"  Status: {status}")
     if mfu is not None:
         lines.append(f"  MFU: {mfu}")
     if error:
         lines.append(f"  Error: {error}")
 
-    if status and "failed" in status.lower():
+    if "failed" in status.lower():
         lines.append("")
         lines.append("The previous code FAILED evaluation. You MUST fix the issues.")
         lines.append("Common failure reasons: gradient error > 2%, loss too different from reference,")
         lines.append("returning None for final_logits, wrong token count, or crashing.")
         lines.append("Make the new version more conservative — prioritize correctness over speed.")
-        # Include the failed code so the model can see what went wrong
         if code_file:
             code_path = output_dir / code_file
             if code_path.exists():
@@ -211,6 +221,13 @@ def get_previous_result_section(output_dir: Path) -> str:
     elif status == "finished" and mfu is not None:
         lines.append("")
         lines.append(f"The previous code succeeded with MFU={mfu}. Try to beat it while keeping correctness.")
+        if code_file:
+            code_path = output_dir / code_file
+            if code_path.exists():
+                success_code = code_path.read_text()
+                lines.append("")
+                lines.append(f"Previous successful code ({code_file}):")
+                lines.append(success_code)
 
     return "\n".join(lines) + "\n"
 

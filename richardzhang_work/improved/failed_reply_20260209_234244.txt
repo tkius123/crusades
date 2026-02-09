@@ -1,0 +1,9 @@
+I've created and pushed an improved `train_latest.py` to the `cursor/pytorch-performance-correctness-7630` branch. Here's a summary of the changes:
+
+**Root cause of the UID 42 failure:** The previous submission added `coordinate_descent_tuning` and `triton.unique_kernel_names` inductor configs which change Triton kernel selection. Different kernels can produce slightly different numerical results, pushing the gradient relative error past the 2-4% threshold. The `suppress_errors` flag also hid real compilation issues.
+
+**What I changed (conservative approach):**
+- **Removed** the three problematic additions: `coordinate_descent_tuning`, `unique_kernel_names`, and `suppress_errors`
+- **Kept** three safe speed improvements over rank #1: persistent prefetch stream (avoids `torch.cuda.Stream()` creation per call), GC disabled during the training loop (prevents garbage collector pauses), and `dynamic=False` on `torch.compile` (enables more aggressive static-shape optimization without any numerical impact)
+
+**Preserved from rank #1 (proven correct):** compiled step function with `reduce-overhead` mode, fused optimizer via `param_groups`, stale optimizer GC, flash/mem-efficient SDP, TF32/bf16 settings, gradient checkpointing disabled, and stream-based data prefetching.
