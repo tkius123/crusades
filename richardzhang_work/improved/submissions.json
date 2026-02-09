@@ -5,6 +5,10 @@
     "uid": 42,
     "gist_url": "https://gist.githubusercontent.com/tkius123/f4022c8f30cf6ee3cfe7cbae4d614ae1/raw/26114139a351ec98e846df82966aec82551f0290/train.py",
     "code_file": "train_20260209_221237.py",
-    "submitted_at": "2026-02-09T22:13:16.776776"
+    "submitted_at": "2026-02-09T22:13:16.776776",
+    "submission_id": "v3_commit_7509230_42",
+    "status": "failed_evaluation",
+    "mfu": null,
+    "last_checked": "2026-02-09T22:45:05.699911"
   }
 ]

@@ -1,0 +1,182 @@
+[
+  {
+    "submission_id": "v3_commit_7509230_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 22:33:21.069329",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7507246_56",
+    "miner_hotkey": "5DPqPRqxQukbsa5u9dxnbSDm8vkHJxA3AgND11MGiDwjQu4y",
+    "miner_uid": 56,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 15:56:29.574599",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7505762_56",
+    "miner_hotkey": "5DPqPRqxQukbsa5u9dxnbSDm8vkHJxA3AgND11MGiDwjQu4y",
+    "miner_uid": 56,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 10:59:33.693554",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7505434_109",
+    "miner_hotkey": "5CSwzyUVo8WJW9EnH6bV29bBXABfsMCTFQtAqkT9h18N5Y8f",
+    "miner_uid": 109,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 10:11:26.962952",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7505520_95",
+    "miner_hotkey": "5GEJ15P3n3vkuWfpo1nzJ3RNTG32sRcUpnub3syyz5CdPnBN",
+    "miner_uid": 95,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 10:11:26.957370",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7505431_241",
+    "miner_hotkey": "5GNAcRTcvmr1CgeJco6K4HpAFU7vT5B69VUcukgkrec7inCn",
+    "miner_uid": 241,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 10:11:26.951073",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7505428_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "status": "finished",
+    "final_score": 45.56464795197573,
+    "created_at": "2026-02-09 09:52:46.667636",
+    "error": null
+  },
+  {
+    "submission_id": "v3_commit_7501545_208",
+    "miner_hotkey": "5EPiCtsbu53p569NLvWC1xqihyMeTZsL9hJ45Uu1TJ5j6oju",
+    "miner_uid": 208,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 04:03:48.933120",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7502040_109",
+    "miner_hotkey": "5CSwzyUVo8WJW9EnH6bV29bBXABfsMCTFQtAqkT9h18N5Y8f",
+    "miner_uid": 109,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 04:03:48.927547",
+    "error": "Fatal error (deterministic failure): final_logits is None - must return actual logits for verification"
+  },
+  {
+    "submission_id": "v3_commit_7502034_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 04:03:48.918706",
+    "error": "Fatal error (deterministic failure): final_logits is None - must return actual logits for verification"
+  },
+  {
+    "submission_id": "v3_commit_7502037_241",
+    "miner_hotkey": "5GNAcRTcvmr1CgeJco6K4HpAFU7vT5B69VUcukgkrec7inCn",
+    "miner_uid": 241,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-09 04:03:48.909286",
+    "error": "Fatal error (deterministic failure): final_logits is None - must return actual logits for verification"
+  },
+  {
+    "submission_id": "v3_commit_7501275_56",
+    "miner_hotkey": "5DPqPRqxQukbsa5u9dxnbSDm8vkHJxA3AgND11MGiDwjQu4y",
+    "miner_uid": 56,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 20:46:29.210143",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7501265_90",
+    "miner_hotkey": "5Ebmh9eNqQPyRZPrQ6Fr5JJmvZ8gSiqZbXe8AHyrdGkPVUoU",
+    "miner_uid": 90,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 20:46:29.204656",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7501273_44",
+    "miner_hotkey": "5HQgy3swjVbAJAogM8SLGQPeq2JRrtJ2NJefH3NyrhzidV69",
+    "miner_uid": 44,
+    "status": "finished",
+    "final_score": 40.65162750036732,
+    "created_at": "2026-02-08 20:46:29.199246",
+    "error": null
+  },
+  {
+    "submission_id": "v3_commit_7501275_157",
+    "miner_hotkey": "5G6Qst4JteisPpZxwYdYB8gZ3yokGxuYWMNHuy3AU92tCj4d",
+    "miner_uid": 157,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 20:46:29.193688",
+    "error": "Success rate 40.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7501494_191",
+    "miner_hotkey": "5DCsaYaL5VnvnMVRbuTojQFJafXVxuVucAbsPM9XQZATZp83",
+    "miner_uid": 191,
+    "status": "finished",
+    "final_score": 41.41047569685351,
+    "created_at": "2026-02-08 20:46:29.188130",
+    "error": null
+  },
+  {
+    "submission_id": "v3_commit_7501480_78",
+    "miner_hotkey": "5Fv3pzzRPbPuzBS4oNXVxU1rtssWvEkkdQ7aNhdRyvgkPinC",
+    "miner_uid": 78,
+    "status": "finished",
+    "final_score": 40.8314576385508,
+    "created_at": "2026-02-08 20:46:29.182579",
+    "error": null
+  },
+  {
+    "submission_id": "v3_commit_7501257_74",
+    "miner_hotkey": "5HKsMHJcW55eDi2VT3rg2ys12XsSMTMFVSdFgRbY4SrZuAKB",
+    "miner_uid": 74,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 20:46:29.175383",
+    "error": "Success rate 0.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7500620_178",
+    "miner_hotkey": "5C8dR6A6afdBga8D12qLHpczr2yYjKPctotQxTm5a76kUzYX",
+    "miner_uid": 178,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 19:39:57.760847",
+    "error": "Success rate 20.0% below minimum 50%"
+  },
+  {
+    "submission_id": "v3_commit_7500597_207",
+    "miner_hotkey": "5GvGGVD2VJPhxDYHuMLE6xVLTQ3N6xmjYtGGQU8c1Amke2vw",
+    "miner_uid": 207,
+    "status": "failed_evaluation",
+    "final_score": null,
+    "created_at": "2026-02-08 19:39:57.755935",
+    "error": "Success rate 20.0% below minimum 50%"
+  }
+]
