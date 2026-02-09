@@ -1,0 +1,20 @@
+[Unit]
+Description=Crusades improve and submit (analyze honest miners, generate improved train.py)
+After=network.target
+
+[Service]
+Type=simple
+User=REPLACE_USER
+WorkingDirectory=REPLACE_WORKDIR
+Environment="PATH=REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Required: CURSOR_API_KEY and CURSOR_REPO (from .env or env file)
+# For auto-submit: GITHUB_TOKEN, WALLET_NAME, WALLET_HOTKEY, NETWORK
+# Optional: IMPROVE_INTERVAL=3600 IMPROVE_LOG_FILE=...
+ExecStart=uv run python REPLACE_WORKDIR/richardzhang_work/improve_and_submit.py --service --interval 3600
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
