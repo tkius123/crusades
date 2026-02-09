@@ -298,10 +298,6 @@ def run_fetch(
             recent = fetch_recent_submissions(client, api_url)
             if recent:
                 log(f"  {len(recent)} recent submission(s) returned.", log_path)
-                # Also save recent snapshot
-                (out_dir / f"recent_{ts}.json").write_text(
-                    json.dumps(recent, indent=2, default=str)
-                )
                 update_my_submissions(client, api_url, recent, my_uids, submissions_path, log_path)
             else:
                 log("  No recent submissions returned.", log_path)

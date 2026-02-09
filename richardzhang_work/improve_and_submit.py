@@ -77,11 +77,12 @@ ALLOWED optimizations (legitimate speed-ups):
 - Freeing stale optimizer states via gc
 - Any other optimization that doesn't change the math or bypass the optimizer
 
-Below are the top honest submissions (not gaming). Study their techniques, combine the best ideas, and generate an IMPROVED train.py that is faster.
+Below is the current #1 honest submission (not gaming). Use it as the base and improve it to be faster.
 
 {notes_section}
 {previous_result_section}
-{submissions_block}
+=== Current #1 submission ===
+{top_code}
 
 Your reply must be ONLY the complete improved train.py Python code.
 No explanation. No markdown fences. No commentary. Just the raw Python code starting with imports.
@@ -329,10 +330,17 @@ def pick_wallet(wallets: list[dict], output_dir: Path, cooldown_sec: int = WALLE
     return eligible[0][0]
 
 
-def record_submission(output_dir: Path, wallet: dict, gist_url: str = "", code_file: str = "") -> None:
-    """Record that a wallet just submitted (update cooldown history + submission log)."""
+def record_submission(
+    output_dir: Path,
+    wallet: dict,
+    gist_url: str = "",
+    code_file: str = "",
+    submit_status: str = "submitted",
+    error: str = "",
+) -> None:
+    """Record a submission attempt (success or failure) in cooldown history + submissions log."""
     now = datetime.now().isoformat()
-    # Update cooldown history
+    # Update cooldown history (even on failure — we used the wallet's turn)
     history = load_wallet_history(output_dir)
     history[wallet_key(wallet)] = now
     save_wallet_history(output_dir, history)
@@ -344,14 +352,18 @@ def record_submission(output_dir: Path, wallet: dict, gist_url: str = "", code_f
             submissions = json.loads(submissions_file.read_text())
         except (json.JSONDecodeError, OSError):
             submissions = []
-    submissions.append({
+    entry: dict = {
         "wallet_name": wallet["name"],
         "wallet_hotkey": wallet["hotkey"],
         "uid": wallet.get("uid"),
         "gist_url": gist_url,
         "code_file": code_file,
+        "submit_status": submit_status,
         "submitted_at": now,
-    })
+    }
+    if error:
+        entry["error"] = error
+    submissions.append(entry)
     submissions_file.write_text(json.dumps(submissions, indent=2))
 
 
@@ -467,19 +479,17 @@ def run_improve(
         log("No honest submissions found. Run check_gaming.py first.", log_path)
         return 1
 
-    log(f"Found {len(honest)} honest submission(s): {', '.join(sid for _, sid, _ in honest)}", log_path)
+    # Use only the top 1 honest submission (smallest rank)
+    top_rank, top_sid, top_code = honest[0]
+    log(f"Using #1 honest submission: {top_sid} (rank {top_rank})", log_path)
 
     # Build prompt
     notes_section = load_notes(notes_path) if notes_path else ""
     previous_result_section = get_previous_result_section(output_dir)
-    parts = []
-    for rank, sid, code in honest:
-        parts.append(f"=== {sid} (rank {rank}) ===\n{code}")
-    submissions_block = "\n\n".join(parts)
     prompt = IMPROVE_PROMPT.format(
         notes_section=notes_section,
         previous_result_section=previous_result_section,
-        submissions_block=submissions_block,
+        top_code=top_code,
     )
 
     log(f"Launching Cursor agent to generate improved train.py (model={model or 'auto'})...", log_path)
@@ -549,11 +559,13 @@ def run_improve(
             cwd=str(Path(__file__).resolve().parent.parent),
         )
         if result.returncode == 0:
-            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name)
+            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="submitted")
             log("Submission successful!", log_path)
             log(result.stdout, log_path)
         else:
-            log(f"Submission failed (exit {result.returncode}): {result.stderr}", log_path)
+            err_msg = result.stderr.strip()[:500]
+            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="failed", error=err_msg)
+            log(f"Submission failed (exit {result.returncode}): {err_msg}", log_path)
             return 1
 
     return 0
