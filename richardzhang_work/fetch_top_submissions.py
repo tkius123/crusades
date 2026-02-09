@@ -34,7 +34,7 @@ from typing import Any
 import httpx
 
 DEFAULT_API_URL = "http://69.19.137.219:8080"
-DEFAULT_TOP_N = 10
+DEFAULT_TOP_N = 5
 DEFAULT_INTERVAL_SEC = 300  # 5 minutes
 
 

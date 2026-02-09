@@ -75,6 +75,7 @@ ALLOWED optimizations (legitimate speed-ups):
 Below are the top honest submissions (not gaming). Study their techniques, combine the best ideas, and generate an IMPROVED train.py that is faster.
 
 {notes_section}
+{previous_result_section}
 {submissions_block}
 
 Reply with ONLY the complete improved train.py code (no explanation, no markdown fences, just the Python code).
@@ -124,12 +125,11 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
     }
     if model and model.lower() != "auto":
         body["model"] = model
-    with httpx.Client() as client:
+    with httpx.Client(timeout=60.0) as client:
         resp = client.post(
             f"{CURSOR_API_BASE}/agents",
             headers={"Content-Type": "application/json", **auth_headers(api_key)},
             json=body,
-            timeout=30,
         )
         if resp.status_code not in (200, 201):
             print(f"Agent launch failed ({resp.status_code}): {resp.text}", flush=True)
@@ -141,7 +141,6 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
             status = client.get(
                 f"{CURSOR_API_BASE}/agents/{agent_id}",
                 headers=auth_headers(api_key),
-                timeout=15,
             ).json().get("status", "UNKNOWN")
             if status in ("FINISHED", "FAILED"):
                 break
@@ -154,7 +153,6 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
         conv = client.get(
             f"{CURSOR_API_BASE}/agents/{agent_id}/conversation",
             headers=auth_headers(api_key),
-            timeout=15,
         ).json()
         for m in reversed(conv.get("messages", [])):
             if m.get("type") == "assistant_message" and m.get("text"):
@@ -163,6 +161,52 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
 
 
 # ── Helpers ──────────────────────────────────────────────────
+
+def get_previous_result_section(output_dir: Path) -> str:
+    """Load the most recent submission result and its code for feedback in the prompt."""
+    submissions_path = output_dir / "submissions.json"
+    if not submissions_path.exists():
+        return ""
+    try:
+        submissions = json.loads(submissions_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return ""
+    if not submissions:
+        return ""
+
+    last = submissions[-1]
+    status = last.get("status", "unknown")
+    mfu = last.get("mfu")
+    code_file = last.get("code_file", "")
+    error = last.get("error", "")
+
+    lines = ["IMPORTANT — Your previous submission result:"]
+    lines.append(f"  Status: {status}")
+    if mfu is not None:
+        lines.append(f"  MFU: {mfu}")
+    if error:
+        lines.append(f"  Error: {error}")
+
+    if status and "failed" in status.lower():
+        lines.append("")
+        lines.append("The previous code FAILED evaluation. You MUST fix the issues.")
+        lines.append("Common failure reasons: gradient error > 2%, loss too different from reference,")
+        lines.append("returning None for final_logits, wrong token count, or crashing.")
+        lines.append("Make the new version more conservative — prioritize correctness over speed.")
+        # Include the failed code so the model can see what went wrong
+        if code_file:
+            code_path = output_dir / code_file
+            if code_path.exists():
+                failed_code = code_path.read_text()
+                lines.append("")
+                lines.append(f"Previous failed code ({code_file}):")
+                lines.append(failed_code)
+    elif status == "finished" and mfu is not None:
+        lines.append("")
+        lines.append(f"The previous code succeeded with MFU={mfu}. Try to beat it while keeping correctness.")
+
+    return "\n".join(lines) + "\n"
+
 
 def load_notes(notes_path: Path) -> str:
     if not notes_path.exists():
@@ -412,12 +456,14 @@ def run_improve(
 
     # Build prompt
     notes_section = load_notes(notes_path) if notes_path else ""
+    previous_result_section = get_previous_result_section(output_dir)
     parts = []
     for rank, sid, code in honest:
         parts.append(f"=== {sid} (rank {rank}) ===\n{code}")
     submissions_block = "\n\n".join(parts)
     prompt = IMPROVE_PROMPT.format(
         notes_section=notes_section,
+        previous_result_section=previous_result_section,
         submissions_block=submissions_block,
     )
 
