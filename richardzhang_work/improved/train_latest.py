@@ -23,6 +23,9 @@ _pf_stream = None
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
     """Optimized training loop for maximum TPS.
 
+    Based on rank 1's proven approach with safe improvements only.
+    Prioritizes correctness (gradient error < 4%) over marginal speed gains.
+
     Args:
         model: HuggingFace model
         data_iterator: Yields batches of token ids
@@ -70,22 +73,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             # Persistent prefetch stream (avoid recreating each call)
             _pf_stream = torch.cuda.Stream()
 
-            # Inductor tuning for better compiled kernels
-            try:
-                import torch._inductor.config as _ic
-                _ic.coordinate_descent_tuning = True
-                _ic.triton.unique_kernel_names = True
-                _ic.fx_graph_cache = True
-            except Exception:
-                pass
-
-            # Suppress dynamo errors — fall back to eager silently
-            try:
-                import torch._dynamo.config as _dc
-                _dc.suppress_errors = True
-            except Exception:
-                pass
-
     # =========================================================================
     # PER-CALL SETUP — lightweight, runs each inner_steps call
     # =========================================================================
@@ -95,7 +82,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
 
-    # Enable fused optimizer — single CUDA kernel for param update
+    # Fused optimizer — single CUDA kernel for param update
     if is_cuda:
         try:
             for group in optimizer.param_groups:
@@ -107,10 +94,10 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
     # =========================================================================
     # COMPILED TRAIN STEP — cached globally across calls
-    # Compiles forward+loss+backward as one unit for maximum fusion.
+    # Returns (loss, logits) so we can return final_logits for verification.
     # =========================================================================
     if _train_fn is None:
-        dev_type = device.type if isinstance(device, torch.device) else ("cuda" if is_cuda else "cpu")
+        dev_type = device.type
 
         def _eager_step(input_ids, labels):
             with torch.autocast(device_type=dev_type, dtype=torch.bfloat16):
@@ -129,7 +116,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
                     _eager_step,
                     mode="reduce-overhead",
                     fullgraph=False,
-                    dynamic=False,
                 )
             except Exception:
                 _train_fn = _eager_step
@@ -213,7 +199,7 @@ if __name__ == "__main__":
     from transformers import AutoModelForCausalLM
 
     print("=" * 60)
-    print("TESTING train.py — Optimized (compiled step + CUDA graphs)")
+    print("TESTING train.py — Rank 1 base + safe improvements")
     print("=" * 60)
     print()
 
@@ -328,14 +314,3 @@ if __name__ == "__main__":
     median_tps = tps_list[len(tps_list) // 2]
     print(f"Median TPS: {median_tps:,.0f}")
     print("Done!")
-```
-
-**Key improvements over rank 1 (the base):**
-
-- **Persistent prefetch stream** (`_pf_stream` cached globally) -- avoids creating a new `torch.cuda.Stream()` on every `inner_steps` call, eliminating small CUDA API overhead across warmup + timed passes.
-- **GC disabled during training loop** -- Python's cyclic garbage collector can cause unpredictable pauses mid-loop; disabling it for the duration of the tight training loop and re-enabling afterward (via `try/finally`) removes that jitter.
-- **Inductor compiler tuning** -- `coordinate_descent_tuning`, `triton.unique_kernel_names`, and `fx_graph_cache` give the TorchInductor backend better kernel selection and caching across calls.
-- **`dynamic=False` on `torch.compile`** -- explicitly tells the compiler that tensor shapes are static, enabling more aggressive CUDA graph capture and avoiding guard overhead.
-- **`torch._dynamo.config.suppress_errors = True`** -- ensures any dynamo tracing issue silently falls back to eager rather than raising an exception that could disrupt the timed pass.
-
-All other proven techniques from rank 1 are preserved: compiled step function (forward+loss+backward as one unit), `reduce-overhead` mode with CUDA graphs, fused optimizer via `param_groups`, stale optimizer GC, gradient checkpointing disabled, flash SDP, TF32/bf16 settings, and async stream-based data prefetching.
