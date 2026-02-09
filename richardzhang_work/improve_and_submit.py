@@ -47,7 +47,12 @@ WALLET_COOLDOWN_SEC = 4320  # 1.2 hours = 72 minutes
 AGENT_POLL_INTERVAL = 5
 AGENT_POLL_MAX = 180  # ~15 min (generation is more complex)
 
-IMPROVE_PROMPT = """Do not edit any files in the repository. Just analyze the code I provide and reply with an improved version.
+IMPROVE_PROMPT = """CRITICAL INSTRUCTIONS:
+- Do NOT edit, create, or modify any files in the repository.
+- Do NOT run any commands or code.
+- Do NOT use any tools.
+- ONLY reply in this conversation with the complete Python code.
+- Your ENTIRE reply must be valid Python code and nothing else — no explanations, no markdown, no commentary.
 
 You are an expert PyTorch performance engineer competing in the Templar Crusades MFU benchmark.
 
@@ -78,7 +83,8 @@ Below are the top honest submissions (not gaming). Study their techniques, combi
 {previous_result_section}
 {submissions_block}
 
-Reply with ONLY the complete improved train.py code (no explanation, no markdown fences, just the Python code).
+Your reply must be ONLY the complete improved train.py Python code.
+No explanation. No markdown fences. No commentary. Just the raw Python code starting with imports.
 """
 
 
@@ -245,18 +251,27 @@ def get_honest_submissions(
 
 
 def extract_code(reply: str) -> str:
-    """Extract Python code from agent reply (strip markdown fences if any)."""
-    code = reply.strip()
-    # Remove markdown code fences
-    if code.startswith("```"):
-        lines = code.split("\n")
-        # Remove first line (```python or ```)
-        lines = lines[1:]
-        # Remove last ``` if present
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        code = "\n".join(lines)
-    return code
+    """Extract Python code from agent reply. Handles markdown fences, leading commentary, etc."""
+    import re as _re
+    text = reply.strip()
+
+    # Try to extract from markdown code fence first (```python ... ```)
+    m = _re.search(r"```(?:python)?\s*\n(.*?)```", text, _re.DOTALL)
+    if m:
+        return m.group(1).strip()
+
+    # If the reply starts with commentary (not Python), find the first import/from/def/class line
+    lines = text.split("\n")
+    first_code_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(("import ", "from ", "def ", "class ", '"""', "# ", "@dataclass")):
+            first_code_idx = i
+            break
+    if first_code_idx is not None and first_code_idx > 0:
+        return "\n".join(lines[first_code_idx:]).strip()
+
+    return text
 
 
 # ── Wallet selection (cooldown-based) ─────────────────────────
@@ -477,7 +492,12 @@ def run_improve(
 
     # Validate basic structure
     if "def inner_steps" not in improved_code:
-        log("WARNING: Generated code doesn't contain 'def inner_steps' — may be invalid.", log_path)
+        log("ERROR: Generated code doesn't contain 'def inner_steps'. Skipping submit.", log_path)
+        log("  Agent may have returned an explanation instead of code. Saving for inspection.", log_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        (output_dir / f"failed_reply_{ts}.txt").write_text(reply)
+        return 1
 
     # Save
     output_dir.mkdir(parents=True, exist_ok=True)

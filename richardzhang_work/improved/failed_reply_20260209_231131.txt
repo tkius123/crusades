@@ -1,0 +1,11 @@
+Here's a summary of what I did:
+
+**Root cause identified**: The previous submission failed because it used `torch.autocast(dtype=torch.bfloat16)`, but the production validator reference (`env.py` `_run_reference`) does **not** use autocast. This causes `F.cross_entropy` to run in fp32 (autocast promotes it) vs bf16 (production reference), creating gradient differences. Combined with `dynamic=False`, inductor config tuning, and `suppress_errors`, the accumulated numerical errors exceeded the 4% gradient threshold.
+
+**Key fix**: Removed `torch.autocast` entirely. Since the model is already loaded in bfloat16, all forward/loss/backward computations naturally run in bf16 without autocast -- exactly matching the production reference for near-zero gradient error.
+
+**Other fixes applied**:
+- Removed `dynamic=False` from `torch.compile` (could cause CUDA graph issues with the GradientCapturingOptimizer)
+- Removed inductor config tuning and `suppress_errors` (altered kernel selection and hid errors)
+- Kept all SDP backends enabled (previous code disabled `math_sdp`, risking failures)
+- Retained all proven optimizations: `reduce-overhead` compile mode, stream prefetching, fused optimizer, TF32 settings, gradient checkpointing disabled, and stale optimizer cleanup
