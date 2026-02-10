@@ -47,12 +47,8 @@ WALLET_COOLDOWN_SEC = 4320  # 1.2 hours = 72 minutes
 AGENT_POLL_INTERVAL = 5
 AGENT_POLL_MAX = 180  # ~15 min (generation is more complex)
 
-IMPROVE_PROMPT = """CRITICAL INSTRUCTIONS:
-- Do NOT edit, create, or modify any files in the repository.
-- Do NOT run any commands or code.
-- Do NOT use any tools.
-- ONLY reply in this conversation with the complete Python code.
-- Your ENTIRE reply must be valid Python code and nothing else — no explanations, no markdown, no commentary.
+IMPROVE_PROMPT = """Write the complete improved train.py code to the file: richardzhang_work/improved/train_agent_output.py
+Do NOT modify any other files. Do NOT run any commands. Only write the one file above.
 
 You are an expert PyTorch performance engineer competing in the Templar Crusades MFU benchmark.
 
@@ -84,8 +80,8 @@ Below is the current #1 honest submission (not gaming). Use it as the base and i
 === Current #1 submission ===
 {top_code}
 
-Your reply must be ONLY the complete improved train.py Python code.
-No explanation. No markdown fences. No commentary. No comments in the code. Just the raw Python code starting with imports.
+Write the complete improved code to richardzhang_work/improved/train_agent_output.py.
+The code must have no comments. Only pure Python.
 """
 
 
@@ -124,7 +120,11 @@ def auth_headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Basic {b64}"}
 
 
+AGENT_OUTPUT_FILE = "richardzhang_work/improved/train_agent_output.py"
+
+
 def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = None) -> str | None:
+    """Launch agent, let it write to AGENT_OUTPUT_FILE, then fetch from its branch via GitHub API."""
     body: dict[str, Any] = {
         "prompt": {"text": prompt},
         "source": {"repository": repo, "ref": "main"},
@@ -141,7 +141,9 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
         if resp.status_code not in (200, 201):
             print(f"Agent launch failed ({resp.status_code}): {resp.text}", flush=True)
             return None
-        agent_id = resp.json()["id"]
+        launch_data = resp.json()
+        agent_id = launch_data["id"]
+        branch_name = launch_data.get("target", {}).get("branchName", "")
 
         for _ in range(AGENT_POLL_MAX):
             time.sleep(AGENT_POLL_INTERVAL)
@@ -157,6 +159,13 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
         if status != "FINISHED":
             return None
 
+        # Read the file from the agent's branch via GitHub API
+        if branch_name:
+            code = _fetch_file_from_branch(client, repo, branch_name, AGENT_OUTPUT_FILE)
+            if code:
+                return code
+
+        # Fallback: try to extract from conversation
         conv = client.get(
             f"{CURSOR_API_BASE}/agents/{agent_id}/conversation",
             headers=auth_headers(api_key),
@@ -164,6 +173,27 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
         for m in reversed(conv.get("messages", [])):
             if m.get("type") == "assistant_message" and m.get("text"):
                 return m["text"]
+    return None
+
+
+def _fetch_file_from_branch(client: httpx.Client, repo_url: str, branch: str, file_path: str) -> str | None:
+    """Fetch a file from a GitHub branch. repo_url is like https://github.com/owner/repo."""
+    # Parse owner/repo from URL
+    parts = repo_url.rstrip("/").split("/")
+    if len(parts) < 2:
+        return None
+    owner, repo_name = parts[-2], parts[-1]
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {"Accept": "application/vnd.github.raw+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    resp = client.get(
+        f"https://api.github.com/repos/{owner}/{repo_name}/contents/{file_path}?ref={branch}",
+        headers=headers,
+        timeout=15,
+    )
+    if resp.status_code == 200:
+        return resp.text
     return None
 
 
@@ -230,6 +260,37 @@ def get_previous_result_section(output_dir: Path) -> str:
                 lines.append(success_code)
 
     return "\n".join(lines) + "\n"
+
+
+def _get_latest_eval_sid(output_dir: Path) -> str | None:
+    """Get submission_id of the most recent evaluated entry in submissions.json."""
+    submissions_path = output_dir / "submissions.json"
+    if not submissions_path.exists():
+        return None
+    try:
+        submissions = json.loads(submissions_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    for entry in reversed(submissions):
+        s = entry.get("status", "")
+        if s and (s == "finished" or "failed" in s.lower()):
+            return entry.get("submission_id") or entry.get("code_file")
+    return None
+
+
+def _load_last_gen_inputs(output_dir: Path) -> dict | None:
+    path = output_dir / "last_gen_inputs.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_last_gen_inputs(output_dir: Path, inputs: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "last_gen_inputs.json").write_text(json.dumps(inputs, indent=2))
 
 
 def load_notes(notes_path: Path) -> str:
@@ -500,9 +561,20 @@ def run_improve(
     top_rank, top_sid, top_code = honest[0]
     log(f"Using #1 honest submission: {top_sid} (rank {top_rank})", log_path)
 
-    # Build prompt
+    # Build prompt inputs
     notes_section = load_notes(notes_path) if notes_path else ""
     previous_result_section = get_previous_result_section(output_dir)
+
+    # Find the most recent evaluated submission id for dedup
+    eval_sid = _get_latest_eval_sid(output_dir)
+
+    # Skip if inputs are identical to last generation attempt
+    last_gen = _load_last_gen_inputs(output_dir)
+    current_inputs = {"top_sid": top_sid, "eval_sid": eval_sid}
+    if last_gen == current_inputs:
+        log(f"Same inputs as last generation (top={top_sid}, eval={eval_sid}). Skipping.", log_path)
+        return 0
+    
     prompt = IMPROVE_PROMPT.format(
         notes_section=notes_section,
         previous_result_section=previous_result_section,
@@ -534,6 +606,9 @@ def run_improve(
     # Also save as latest
     (output_dir / "train_latest.py").write_text(improved_code)
     log(f"Saved improved code to {code_path}", log_path)
+
+    # Record what inputs were used for this generation
+    _save_last_gen_inputs(output_dir, current_inputs)
 
     # Save full reply for reference
     (output_dir / f"agent_reply_{ts}.txt").write_text(reply)

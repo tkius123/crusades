@@ -9,7 +9,7 @@
     "submission_id": "v3_commit_7509230_42",
     "status": "failed_evaluation",
     "mfu": null,
-    "last_checked": "2026-02-09T23:36:37.376424"
+    "last_checked": "2026-02-09T23:57:03.736378"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -19,5 +19,14 @@
     "code_file": "train_20260209_232843.py",
     "submit_status": "submitted",
     "submitted_at": "2026-02-09T23:29:29.276964"
+  },
+  {
+    "wallet_name": "mycoldkey3",
+    "wallet_hotkey": "myhotkey3",
+    "uid": 109,
+    "gist_url": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/2cbee4f30767d869ce49b2dc3b3ceed919d6888a/train.py",
+    "code_file": "train_20260210_000143.py",
+    "submit_status": "submitted",
+    "submitted_at": "2026-02-10T00:02:29.465420"
   }
 ]
