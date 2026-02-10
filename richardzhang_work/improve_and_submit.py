@@ -785,7 +785,12 @@ def run_improve(
             return 1
         available = pick_wallet(wallets, output_dir)
         if available is None:
-            log(f"Skip reason: no wallet available (all submitted within the last {WALLET_COOLDOWN_SEC}s / {WALLET_COOLDOWN_SEC / 3600:.1f}h).", log_path)
+            wait_sec = seconds_until_soonest_wallet_ready(wallets, output_dir)
+            if wait_sec is not None:
+                wait_min = int(wait_sec // 60)
+                log(f"Skip reason: no wallet available. Soonest wallet ready in {wait_min} min.", log_path)
+            else:
+                log(f"Skip reason: no wallet available (cooldown {WALLET_COOLDOWN_SEC}s / {WALLET_COOLDOWN_SEC / 3600:.1f}h).", log_path)
             return 0
 
     honest = get_honest_submissions(gaming_checks_dir, top_submissions_dir)
