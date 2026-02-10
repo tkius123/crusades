@@ -253,5 +253,14 @@
     "code_file": "train_20260210_103756.py",
     "submit_status": "submitted",
     "submitted_at": "2026-02-10T10:38:40.911939"
+  },
+  {
+    "wallet_name": "mycoldkey3",
+    "wallet_hotkey": "myhotkey3",
+    "uid": 109,
+    "gist_url": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/22ff3e5c64fa7c243c41cbddac9dda42cb94ccca/train.py",
+    "code_file": "train_20260210_104117.py",
+    "submit_status": "submitted",
+    "submitted_at": "2026-02-10T10:41:52.829141"
   }
 ]
