@@ -9,7 +9,7 @@
     "submission_id": "v3_commit_7509230_42",
     "status": "failed_evaluation",
     "mfu": null,
-    "last_checked": "2026-02-10T05:06:42.194859"
+    "last_checked": "2026-02-10T05:07:45.721293"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -22,7 +22,7 @@
     "submission_id": "v3_commit_7509610_241",
     "status": "finished",
     "mfu": 45.82041606853024,
-    "last_checked": "2026-02-10T05:06:42.194830"
+    "last_checked": "2026-02-10T05:07:45.721261"
   },
   {
     "wallet_name": "mycoldkey3",
@@ -35,7 +35,7 @@
     "submission_id": "v3_commit_7509775_109",
     "status": "finished",
     "mfu": 46.013714755246795,
-    "last_checked": "2026-02-10T05:06:42.194802"
+    "last_checked": "2026-02-10T05:07:45.721219"
   },
   {
     "wallet_name": "mycoldkey1",
@@ -48,7 +48,7 @@
     "submission_id": "v3_commit_7509866_42",
     "status": "finished",
     "mfu": 6.59271439897305,
-    "last_checked": "2026-02-10T05:06:42.194772"
+    "last_checked": "2026-02-10T05:07:45.721190"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -61,7 +61,7 @@
     "submission_id": "v3_commit_7510026_241",
     "status": "finished",
     "mfu": 45.864765300293826,
-    "last_checked": "2026-02-10T05:06:42.194741"
+    "last_checked": "2026-02-10T05:07:45.721161"
   },
   {
     "wallet_name": "mycoldkey3",
@@ -74,7 +74,7 @@
     "submission_id": "v3_commit_7510180_109",
     "status": "finished",
     "mfu": 4.0631573912129495,
-    "last_checked": "2026-02-10T05:06:42.194705"
+    "last_checked": "2026-02-10T05:07:45.721129"
   },
   {
     "wallet_name": "mycoldkey1",
@@ -87,7 +87,7 @@
     "submission_id": "v3_commit_7510303_42",
     "status": "finished",
     "mfu": 45.91772280854339,
-    "last_checked": "2026-02-10T05:06:42.194674"
+    "last_checked": "2026-02-10T05:07:45.721097"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -100,7 +100,7 @@
     "submission_id": "v3_commit_7510434_241",
     "status": "finished",
     "mfu": 4.745431800539091,
-    "last_checked": "2026-02-10T05:06:42.194641"
+    "last_checked": "2026-02-10T05:07:45.721063"
   },
   {
     "wallet_name": "mycoldkey3",
@@ -113,7 +113,7 @@
     "submission_id": "v3_commit_7510611_109",
     "status": "finished",
     "mfu": 4.252994335927992,
-    "last_checked": "2026-02-10T05:06:42.194603"
+    "last_checked": "2026-02-10T05:07:45.721028"
   },
   {
     "wallet_name": "mycoldkey1",
@@ -126,7 +126,7 @@
     "submission_id": "v3_commit_7510726_42",
     "status": "finished",
     "mfu": 4.285334080529317,
-    "last_checked": "2026-02-10T05:06:42.194537"
+    "last_checked": "2026-02-10T05:07:45.720978"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -139,7 +139,7 @@
     "submission_id": "v3_commit_7510945_241",
     "status": "finished",
     "mfu": 45.8787304537246,
-    "last_checked": "2026-02-10T05:06:42.194494"
+    "last_checked": "2026-02-10T05:07:45.720898"
   },
   {
     "wallet_name": "mycoldkey3",
@@ -152,7 +152,7 @@
     "submission_id": "v3_commit_7511017_109",
     "status": "finished",
     "mfu": 6.555940723499557,
-    "last_checked": "2026-02-10T05:06:42.194434"
+    "last_checked": "2026-02-10T05:07:45.720788"
   },
   {
     "wallet_name": "mycoldkey1",
