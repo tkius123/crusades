@@ -258,6 +258,7 @@ improved/
   "gist_url": "https://gist.githubusercontent.com/.../train.py",
   "code_file": "train_20260209_232843.py",
   "policy": "minor",
+  "top_sid": "v3_commit_7501050_79",
   "submit_status": "submitted",
   "submitted_at": "2026-02-09T23:29:29.276964",
   "submission_id": "v3_commit_7509610_241",
@@ -266,6 +267,8 @@ improved/
   "last_checked": "2026-02-10T00:24:12.810913"
 }
 ```
+
+`policy` = improvement policy used (copycat | minor | major). `top_sid` = #1 honest submission we improved from.
 
 ---
 

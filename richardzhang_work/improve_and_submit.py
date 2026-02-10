@@ -961,12 +961,12 @@ def run_improve(
             cwd=str(Path(__file__).resolve().parent.parent),
         )
         if result.returncode == 0:
-            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="submitted")
+            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="submitted", policy=policy, top_sid=top_sid)
             log("Submission successful!", log_path)
             log(result.stdout, log_path)
         else:
             err_msg = result.stderr.strip()[:500]
-            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="failed", error=err_msg, policy=policy)
+            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="failed", error=err_msg, policy=policy, top_sid=top_sid)
             log(f"Submission failed (exit {result.returncode}): {err_msg}", log_path)
             return 1
 

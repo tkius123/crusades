@@ -252,7 +252,11 @@
     "gist_url": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/53ec0df6ab38e5c26cef2d49616ab1aa29aeacab/train.py",
     "code_file": "train_20260210_103756.py",
     "submit_status": "submitted",
-    "submitted_at": "2026-02-10T10:38:40.911939"
+    "submitted_at": "2026-02-10T10:38:40.911939",
+    "submission_id": "v3_commit_7512956_241",
+    "status": "finished",
+    "mfu": 45.826713816535744,
+    "last_checked": "2026-02-10T11:24:10.791527"
   },
   {
     "wallet_name": "mycoldkey3",
