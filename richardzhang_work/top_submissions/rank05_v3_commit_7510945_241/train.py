@@ -39,6 +39,34 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             torch.backends.cuda.enable_mem_efficient_sdp(True)
             torch.backends.cuda.enable_math_sdp(False)
 
+            try:
+                torch.autograd.set_detect_anomaly(False)
+            except Exception:
+                pass
+
+            try:
+                torch._C._jit_set_profiling_mode(False)
+                torch._C._jit_set_profiling_executor(False)
+            except Exception:
+                pass
+
+            try:
+                torch._dynamo.config.cache_size_limit = 256
+            except Exception:
+                pass
+            try:
+                torch._dynamo.config.automatic_dynamic_shapes = False
+            except Exception:
+                pass
+            try:
+                torch._dynamo.config.assume_static_by_default = True
+            except Exception:
+                pass
+            try:
+                torch._dynamo.config.suppress_errors = True
+            except Exception:
+                pass
+
             for obj in gc.get_objects():
                 if isinstance(obj, torch.optim.Optimizer) and obj is not optimizer:
                     obj.state.clear()
@@ -63,13 +91,16 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             pass
 
     if _train_fn is None:
+        dev_type = device.type
+
         def _eager_step(input_ids, labels):
-            logits = model(input_ids).logits
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                labels.reshape(-1),
-                ignore_index=-100,
-            )
+            with torch.autocast(device_type=dev_type, dtype=torch.bfloat16):
+                logits = model(input_ids).logits
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    labels.reshape(-1),
+                    ignore_index=-100,
+                )
             loss.backward()
             return loss.detach(), logits.detach()
 
@@ -79,6 +110,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
                     _eager_step,
                     mode="reduce-overhead",
                     fullgraph=False,
+                    dynamic=False,
                 )
             except Exception:
                 _train_fn = _eager_step
