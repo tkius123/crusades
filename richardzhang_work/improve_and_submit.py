@@ -24,20 +24,22 @@ Usage:
 
 Config (richardzhang_work/improve_config.json):
   no_comment          — true (default) = output must have no comments; false = comments allowed
-  improvement_policy — "copycat" | "minor" (default) | "major"
-    copycat: exactly copy top submission, only change variable names
-    minor:   1 or 2 modifications from the top submission
-    major:   one significant change that the AI recommends
+  improvement_policy — "circular" (default) | "copycat" | "minor" | "major"
+    circular: cycle copycat → minor → major each run
+    copycat:  exactly copy top submission, only change variable names
+    minor:    1 or 2 modifications from the top submission
+    major:    one significant change that the AI recommends
 
 Env overrides:
   IMPROVE_INTERVAL   — seconds between runs in --service (default: 3600)
   IMPROVE_LOG_FILE   — log file path
   IMPROVE_NO_COMMENT — true | false (overrides no_comment from config)
-  IMPROVE_POLICY     — copycat | minor | major (overrides improvement_policy)
+  IMPROVE_POLICY     — circular | copycat | minor | major (overrides improvement_policy)
 """
 
 import argparse
 import base64
+import difflib
 import json
 import os
 import signal
@@ -84,6 +86,7 @@ ALLOWED optimizations (legitimate speed-ups):
 
 {strategy_section}
 
+{applied_changes_section}
 {notes_section}
 The section below (if present) shows your previous improvement's evaluation result and MFU; use it to avoid regressions or repeating failures.
 {previous_result_section}
@@ -101,10 +104,12 @@ def script_dir() -> Path:
 
 IMPROVE_CONFIG_DEFAULTS: dict[str, Any] = {
     "no_comment": True,
-    "improvement_policy": "minor",
+    "improvement_policy": "circular",
 }
 
-VALID_POLICIES = ("copycat", "minor", "major")
+VALID_POLICIES = ("copycat", "minor", "major", "circular")
+POLICY_CYCLE = ("copycat", "minor", "major")  # order for circular mode
+POLICY_CYCLE_FILE = "policy_cycle.json"
 
 
 def load_improve_config(work_dir: Path) -> dict[str, Any]:
@@ -131,9 +136,46 @@ def load_improve_config(work_dir: Path) -> dict[str, Any]:
     return config
 
 
-def build_strategy_section(config: dict[str, Any], top_mfu_section: str) -> str:
-    """Build the strategy block for the prompt based on improvement_policy."""
-    policy = config.get("improvement_policy") or "minor"
+def _load_policy_cycle_index(output_dir: Path) -> int:
+    """Load current index for circular policy (0..2). Default 0."""
+    path = output_dir / POLICY_CYCLE_FILE
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text())
+        i = int(data.get("index", 0))
+        if 0 <= i < len(POLICY_CYCLE):
+            return i
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return 0
+
+
+def _save_policy_cycle_index(output_dir: Path, index: int) -> None:
+    """Persist next cycle index for circular mode."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / POLICY_CYCLE_FILE).write_text(json.dumps({"index": index % len(POLICY_CYCLE)}, indent=2))
+
+
+def resolve_effective_policy(config_policy: str, output_dir: Path) -> tuple[str, int]:
+    """Resolve config policy to effective policy and next cycle index.
+    For circular: effective = CYCLE[current_index], next_index = (current+1) % 3.
+    Otherwise: effective = config_policy, next_index = 0.
+    Returns (effective_policy, next_cycle_index).
+    """
+    if config_policy == "circular":
+        idx = _load_policy_cycle_index(output_dir)
+        effective = POLICY_CYCLE[idx]
+        next_idx = (idx + 1) % len(POLICY_CYCLE)
+        return effective, next_idx
+    base = config_policy or "copycat"
+    if base not in POLICY_CYCLE:
+        base = "copycat"
+    return base, 0
+
+
+def build_strategy_section(policy: str, top_mfu_section: str) -> str:
+    """Build the strategy block for the prompt based on effective improvement_policy."""
     if policy == "copycat":
         return f"""{top_mfu_section}
 STRATEGY — COPYCAT:
@@ -160,6 +202,54 @@ def build_code_style_section(config: dict[str, Any]) -> str:
     if config.get("no_comment", True):
         return "The code must have no comments. Only pure Python."
     return "Comments are allowed if they help explain non-obvious choices."
+
+
+LAST_APPLIED_CHANGES_FILE = "last_applied_changes.json"
+APPLIED_DIFF_MAX_LEN = 8000
+
+
+def _compute_diff(top_code: str, improved_code: str) -> str:
+    """Return a unified diff of improved_code vs top_code (what was applied)."""
+    top_lines = top_code.splitlines(keepends=True)
+    improved_lines = improved_code.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(top_lines, improved_lines, fromfile="top", tofile="improved", lineterm=""))
+    return "\n".join(diff)
+
+
+def save_last_applied_changes(output_dir: Path, top_sid: str, top_code: str, improved_code: str, generated_file: str) -> None:
+    """Record what changes were applied to the top submission (for minor/major)."""
+    diff = _compute_diff(top_code, improved_code)
+    if len(diff) > APPLIED_DIFF_MAX_LEN:
+        diff = diff[:APPLIED_DIFF_MAX_LEN] + "\n... (truncated)"
+    data = {
+        "top_sid": top_sid,
+        "generated_file": generated_file,
+        "applied_diff": diff,
+        "saved_at": datetime.now().isoformat(),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / LAST_APPLIED_CHANGES_FILE).write_text(json.dumps(data, indent=2))
+
+
+def load_applied_changes_section(output_dir: Path, current_top_sid: str) -> str:
+    """Load last applied changes and return prompt section if top_sid matches; else empty."""
+    path = output_dir / LAST_APPLIED_CHANGES_FILE
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text())
+        if data.get("top_sid") != current_top_sid:
+            return ""
+        diff = data.get("applied_diff", "")
+        if not diff:
+            return ""
+        return (
+            "Last time you applied the following changes to the top submission (unified diff: top -> improved):\n"
+            "```\n" + diff + "\n```\n"
+            "Use this to avoid repeating the same edits or to build on them.\n\n"
+        )
+    except (json.JSONDecodeError, OSError):
+        return ""
 
 
 def load_dotenv(env_path: Path) -> None:
@@ -238,13 +328,17 @@ def call_cursor_agent(api_key: str, repo: str, prompt: str, model: str | None = 
             if code:
                 return code
 
-        # Fallback: try to extract from conversation
+        # Fallback: try to extract code from conversation (reply should be short; we prefer file)
         conv = client.get(
             f"{CURSOR_API_BASE}/agents/{agent_id}/conversation",
             headers=auth_headers(api_key),
         ).json()
         for m in reversed(conv.get("messages", [])):
             if m.get("type") == "assistant_message" and m.get("text"):
+                text = m["text"].strip()
+                # If reply looks like a short ack (no code), don't use it as code
+                if len(text) < 400 or "def " not in text:
+                    return None
                 return m["text"]
     return None
 
@@ -653,15 +747,22 @@ def run_improve(
     # Improvement policy and code style from config
     work_dir = script_dir()
     improve_config = load_improve_config(work_dir)
-    strategy_section = build_strategy_section(improve_config, top_mfu_section)
+    config_policy = improve_config.get("improvement_policy") or "circular"
+    policy, next_cycle_index = resolve_effective_policy(config_policy, output_dir)
+    strategy_section = build_strategy_section(policy, top_mfu_section)
     code_style_section = build_code_style_section(improve_config)
-    log(f"Config: no_comment={improve_config.get('no_comment')}, policy={improve_config.get('improvement_policy')}", log_path)
+    log(f"Config: no_comment={improve_config.get('no_comment')}, policy={config_policy} -> effective={policy}", log_path)
 
     # Build prompt inputs
     notes_section = load_notes(notes_path) if notes_path else ""
     previous_result_section = get_previous_result_section(output_dir)
-    if improve_config.get("improvement_policy") == "copycat":
+    if policy == "copycat":
         previous_result_section = ""
+
+    if policy in ("minor", "major"):
+        applied_changes_section = load_applied_changes_section(output_dir, top_sid)
+    else:
+        applied_changes_section = ""
 
     # Find the most recent evaluated submission id for dedup
     eval_sid = _get_latest_eval_sid(output_dir)
@@ -675,6 +776,7 @@ def run_improve(
     
     prompt = IMPROVE_PROMPT.format(
         strategy_section=strategy_section,
+        applied_changes_section=applied_changes_section,
         notes_section=notes_section,
         previous_result_section=previous_result_section,
         top_code=top_code,
@@ -706,6 +808,13 @@ def run_improve(
     # Also save as latest
     (output_dir / "train_latest.py").write_text(improved_code)
     log(f"Saved improved code to {code_path}", log_path)
+
+    if policy in ("minor", "major"):
+        save_last_applied_changes(output_dir, top_sid, top_code, improved_code, code_path.name)
+
+    if config_policy == "circular":
+        _save_policy_cycle_index(output_dir, next_cycle_index)
+        log(f"Circular: next run will use policy={POLICY_CYCLE[next_cycle_index]}", log_path)
 
     # Record what inputs were used for this generation
     _save_last_gen_inputs(output_dir, current_inputs)

@@ -206,15 +206,18 @@ uv run python richardzhang_work/improve_and_submit.py --submit --service
 | Key | Default | Description |
 |-----|---------|-------------|
 | `no_comment` | `true` | If true, generated code must have no comments; if false, comments allowed. |
-| `improvement_policy` | `"minor"` | How much to change vs the #1 submission. |
+| `improvement_policy` | `"circular"` | How much to change vs the #1 submission. |
 
 | `improvement_policy` | Behavior |
 |----------------------|----------|
+| `circular` (default) | Cycle copycat → minor → major → copycat … each run uses the next in the cycle (state in `improved/policy_cycle.json`). |
 | `copycat` | Exactly copy the top submission; only change variable names (no logic change). |
 | `minor` | 1 or 2 small modifications from the top submission. |
 | `major` | One significant change that the AI recommends (e.g. different optimization or structure). |
 
-Override via env: `IMPROVE_NO_COMMENT=true|false`, `IMPROVE_POLICY=copycat|minor|major`.
+Override via env: `IMPROVE_NO_COMMENT=true|false`, `IMPROVE_POLICY=copycat|minor|major|circular`.
+
+For **minor** and **major**, the script records what changed vs the top submission (a unified diff) in `improved/last_applied_changes.json`. On the next run, that diff is included in the prompt so the agent can avoid repeating the same edits or build on them. **Copycat** does not use or update this.
 
 ### Key behaviors
 
@@ -242,6 +245,7 @@ improved/
   wallet_history.json          # last submission time per wallet
   gist.json                    # shared gist ID
   last_gen_inputs.json         # dedup: {top_sid, eval_sid}
+  last_applied_changes.json    # (minor/major) last diff vs top submission, used in next prompt
 ```
 
 **`submissions.json` entry format:**
@@ -371,7 +375,7 @@ sudo journalctl -u <service-name> -f
 richardzhang_work/
   .env                          # secrets (not in git)
   README.md                     # this file
-  improve_config.json           # no_comment, improvement_policy (copycat | minor | major)
+  improve_config.json           # no_comment, improvement_policy (copycat | minor | major | circular)
   gaming_notes.md               # manual notes about gaming patterns (included in AI prompt)
 
   # Python scripts

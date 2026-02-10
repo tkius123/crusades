@@ -1,5 +1,4 @@
 {
   "no_comment": true,
-  "improvement_policy": "copy_original"
+  "improvement_policy": "circular"
 }
-
