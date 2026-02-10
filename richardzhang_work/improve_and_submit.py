@@ -73,11 +73,17 @@ ALLOWED optimizations (legitimate speed-ups):
 - Freeing stale optimizer states via gc
 - Any other optimization that doesn't change the math or bypass the optimizer
 
-Below is the current #1 honest submission (not gaming). Use it as the base and improve it to be faster.
+{top_mfu_section}
+STRATEGY — minimal, conservative edits:
+- Start by copying the ENTIRE #1 submission code below. Do not rewrite it.
+- Then make only ONE or very few small changes at a time so we can see how each change affects MFU.
+- Do not rewrite the training loop; only adjust settings or add one optimization at a time.
+- Your improved code must match or exceed the #1 submission's MFU while passing all verification rules.
 
 {notes_section}
+The section below (if present) shows your previous improvement's evaluation result and MFU; use it to avoid regressions or repeating failures.
 {previous_result_section}
-=== Current #1 submission ===
+=== Current #1 submission (copy this in full, then apply minimal edits) ===
 {top_code}
 
 Write the complete improved code to richardzhang_work/improved/train_agent_output.py.
@@ -291,6 +297,23 @@ def load_notes(notes_path: Path) -> str:
     if not text:
         return ""
     return f"The reviewer has left the following notes:\n{text}\n"
+
+
+def _get_top_submission_mfu(top_submissions_dir: Path, top_rank: int, top_sid: str) -> float | None:
+    """Read #1 submission's MFU from its rank folder stats.json. Returns None if not found."""
+    folder = top_submissions_dir / f"rank{top_rank:02d}_{top_sid}"
+    stats_file = folder / "stats.json"
+    if not stats_file.exists():
+        return None
+    try:
+        data = json.loads(stats_file.read_text())
+        entry = data.get("leaderboard_entry") or data.get("submission_detail") or {}
+        score = entry.get("final_score")
+        if score is not None:
+            return float(score)
+        return None
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
 
 
 def get_honest_submissions(
@@ -552,6 +575,14 @@ def run_improve(
     top_rank, top_sid, top_code = honest[0]
     log(f"Using #1 honest submission: {top_sid} (rank {top_rank})", log_path)
 
+    # Top submission MFU (so agent knows the bar to match or exceed)
+    top_mfu = _get_top_submission_mfu(top_submissions_dir, top_rank, top_sid)
+    if top_mfu is not None:
+        top_mfu_section = f"Current #1 submission achieved MFU: {top_mfu:.2f}%. Your improved code must match or exceed this while passing all verification rules."
+        log(f"Top submission MFU: {top_mfu:.2f}%", log_path)
+    else:
+        top_mfu_section = "Current #1 submission (MFU not available in this run). Your improved code must pass all verification rules."
+
     # Build prompt inputs
     notes_section = load_notes(notes_path) if notes_path else ""
     previous_result_section = get_previous_result_section(output_dir)
@@ -567,6 +598,7 @@ def run_improve(
         return 0
     
     prompt = IMPROVE_PROMPT.format(
+        top_mfu_section=top_mfu_section,
         notes_section=notes_section,
         previous_result_section=previous_result_section,
         top_code=top_code,
