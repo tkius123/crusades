@@ -613,6 +613,32 @@ def wallet_label(w: dict) -> str:
     return f"{w['name']}/{w['hotkey']} (UID {uid})"
 
 
+def seconds_until_soonest_wallet_ready(
+    wallets: list[dict], output_dir: Path, cooldown_sec: int = WALLET_COOLDOWN_SEC
+) -> float | None:
+    """Return seconds until the soonest wallet will be off cooldown, or None if at least one is ready now."""
+    if not wallets:
+        return None
+    history = load_wallet_history(output_dir)
+    now = datetime.now()
+    min_remaining: float | None = None
+    for w in wallets:
+        last_sub = history.get(wallet_key(w))
+        if not last_sub:
+            return None  # one never submitted → ready now
+        try:
+            last_dt = datetime.fromisoformat(last_sub)
+            elapsed = (now - last_dt).total_seconds()
+            remaining = cooldown_sec - elapsed
+            if remaining <= 0:
+                return None  # this wallet is ready
+            if min_remaining is None or remaining < min_remaining:
+                min_remaining = remaining
+        except (ValueError, TypeError):
+            return None
+    return min_remaining
+
+
 def pick_wallet(wallets: list[dict], output_dir: Path, cooldown_sec: int = WALLET_COOLDOWN_SEC) -> dict | None:
     """Pick a wallet that has cooled down (>= cooldown_sec since last submission).
     Among eligible wallets, picks the one with the oldest submission.
