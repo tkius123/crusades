@@ -69,13 +69,13 @@ NETWORK=finney
 cd /root/workspace/crusades
 
 # Full automation: fetch, check gaming, generate, submit, push, sync upstream
-uv run python richardzhang_work/run_all.py --submit
+uv run python richardzhang_work/run_all.py
 
 # Single cycle (no loop):
-uv run python richardzhang_work/run_all.py --submit --once
+uv run python richardzhang_work/run_all.py --once
 
 # Generate but don't submit to chain:
-uv run python richardzhang_work/run_all.py --once
+uv run python richardzhang_work/run_all.py --no-submit
 
 # Don't push git changes:
 uv run python richardzhang_work/run_all.py --once --no-push
@@ -83,11 +83,12 @@ uv run python richardzhang_work/run_all.py --once --no-push
 
 | Flag | Effect |
 |------|--------|
-| `--submit` | Enable auto-submission via `neurons.miner submit` |
 | `--once` | Run one cycle and exit |
+| `--no-submit` | Generate improvements but don't submit to chain |
 | `--no-push` | Skip git add/commit/push step |
-| `--no-submit` | Alias: don't submit (default) |
 | `--interval N` | Seconds between cycles (default: 60) |
+
+> **Note:** Submission is **enabled by default**. Use `--no-submit` to disable it.
 
 ---
 
@@ -402,8 +403,8 @@ richardzhang_work/
 
 | Goal | Command |
 |------|---------|
-| **Run everything (loop)** | `uv run python richardzhang_work/run_all.py --submit` |
-| **Run everything (once)** | `uv run python richardzhang_work/run_all.py --submit --once` |
+| **Run everything (loop)** | `uv run python richardzhang_work/run_all.py` |
+| **Run everything (once)** | `uv run python richardzhang_work/run_all.py --once` |
 | **Fetch leaderboard** | `uv run python richardzhang_work/fetch_top_submissions.py --top 5` |
 | **Fetch + update my results** | `uv run python richardzhang_work/fetch_top_submissions.py --top 5 --recent` |
 | **Check for gaming** | `uv run python richardzhang_work/check_gaming.py` |

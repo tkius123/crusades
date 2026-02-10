@@ -9,7 +9,7 @@
     "submission_id": "v3_commit_7509230_42",
     "status": "failed_evaluation",
     "mfu": null,
-    "last_checked": "2026-02-10T00:24:12.810989"
+    "last_checked": "2026-02-10T00:37:04.827701"
   },
   {
     "wallet_name": "mycoldkey2",
@@ -22,7 +22,7 @@
     "submission_id": "v3_commit_7509610_241",
     "status": "finished",
     "mfu": 45.82041606853024,
-    "last_checked": "2026-02-10T00:24:12.810913"
+    "last_checked": "2026-02-10T00:37:04.827624"
   },
   {
     "wallet_name": "mycoldkey3",
