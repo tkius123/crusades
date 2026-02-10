@@ -210,7 +210,7 @@ uv run python richardzhang_work/improve_and_submit.py --submit --service
 
 | `improvement_policy` | Behavior |
 |----------------------|----------|
-| `circular` (default) | Cycle copycat → minor → major → copycat … each run uses the next in the cycle (state in `improved/policy_cycle.json`). |
+| `circular` (default) | Cycle copycat → minor → major → copycat … each run uses the next in the cycle (state in `improved/policy_cycle.json`). You can manually set `"index"` to 0, 1, or 2 to choose the next policy (0=copycat, 1=minor, 2=major); no other state depends on it. |
 | `copycat` | Exactly copy the top submission; only change variable names (no logic change). |
 | `minor` | 1 or 2 small modifications from the top submission. |
 | `major` | One significant change that the AI recommends (e.g. different optimization or structure). |
@@ -414,7 +414,7 @@ richardzhang_work/
     submissions.json            # all submission attempts + eval results
     wallet_history.json         # cooldown tracking per wallet
     gist.json                   # shared gist ID
-    last_gen_inputs.json        # dedup state
+    last_gen_inputs.json        # last run inputs (reference); top_attempts.json = attempt counts
 ```
 
 ---
@@ -431,7 +431,7 @@ richardzhang_work/
 | **Generate improvement** | `uv run python richardzhang_work/improve_and_submit.py` |
 | **Generate + submit** | `uv run python richardzhang_work/improve_and_submit.py --submit` |
 | **Sync upstream** | `uv run python richardzhang_work/sync_upstream.py --push` |
-| **Force re-generation** | Delete `improved/last_gen_inputs.json`, then run improve |
+| **Reset attempt count for same top** | Edit or delete `improved/top_attempts.json` (e.g. remove or lower the entry for that top_sid) |
 | **Force re-check gaming** | Delete `gaming_checks/state.json`, then run check_gaming |
 | **View submission history** | `cat richardzhang_work/improved/submissions.json` |
 | **View gaming verdicts** | `cat richardzhang_work/gaming_checks/state.json` |

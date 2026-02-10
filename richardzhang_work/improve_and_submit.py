@@ -109,7 +109,7 @@ IMPROVE_CONFIG_DEFAULTS: dict[str, Any] = {
 
 VALID_POLICIES = ("copycat", "minor", "major", "circular")
 POLICY_CYCLE = ("copycat", "minor", "major")  # order for circular mode
-POLICY_CYCLE_FILE = "policy_cycle.json"
+POLICY_CYCLE_FILE = "policy_cycle.json"  # Safe to edit: set "index" to 0=copycat, 1=minor, 2=major for next run
 
 
 def load_improve_config(work_dir: Path) -> dict[str, Any]:
@@ -477,6 +477,65 @@ def _get_top_submission_mfu(top_submissions_dir: Path, top_rank: int, top_sid: s
         return None
 
 
+def _get_top_submission_uid(top_submissions_dir: Path, top_rank: int, top_sid: str) -> int | None:
+    """Read #1 submission's miner_uid from its rank folder stats.json. Returns None if not found."""
+    folder = top_submissions_dir / f"rank{top_rank:02d}_{top_sid}"
+    stats_file = folder / "stats.json"
+    if not stats_file.exists():
+        return None
+    try:
+        data = json.loads(stats_file.read_text())
+        entry = data.get("leaderboard_entry") or data.get("submission_detail") or {}
+        uid = entry.get("miner_uid")
+        if uid is not None:
+            return int(uid)
+        return None
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _get_our_uids(wallets: list[dict] | None) -> set[int]:
+    """Return set of our UIDs from wallets. If wallets is None, try parsing WALLETS env."""
+    if wallets:
+        return {int(w["uid"]) for w in wallets if w.get("uid") is not None}
+    raw = os.environ.get("WALLETS")
+    if not raw:
+        return set()
+    try:
+        lst = json.loads(raw)
+        if isinstance(lst, list):
+            return {int(w["uid"]) for w in lst if isinstance(w, dict) and w.get("uid") is not None}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return set()
+
+
+TOP_ATTEMPTS_FILE = "top_attempts.json"
+MAX_ATTEMPTS_PER_TOP = 6
+
+
+def _load_top_attempts(output_dir: Path) -> dict[str, int]:
+    """Load {top_sid: attempt_count} from top_attempts.json."""
+    path = output_dir / TOP_ATTEMPTS_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            return {k: int(v) for k, v in data.items() if isinstance(v, (int, float))}
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        pass
+    return {}
+
+
+def _increment_top_attempt(output_dir: Path, top_sid: str) -> None:
+    """Increment attempt count for this top_sid and persist."""
+    counts = _load_top_attempts(output_dir)
+    counts[top_sid] = counts.get(top_sid, 0) + 1
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / TOP_ATTEMPTS_FILE).write_text(json.dumps(counts, indent=2))
+
+
 def get_honest_submissions(
     gaming_checks_dir: Path,
     top_submissions_dir: Path,
@@ -724,7 +783,7 @@ def run_improve(
             return 1
         available = pick_wallet(wallets, output_dir)
         if available is None:
-            log(f"No wallet available (all submitted within the last {WALLET_COOLDOWN_SEC}s / {WALLET_COOLDOWN_SEC / 3600:.1f}h). Skipping this turn.", log_path)
+            log(f"Skip reason: no wallet available (all submitted within the last {WALLET_COOLDOWN_SEC}s / {WALLET_COOLDOWN_SEC / 3600:.1f}h).", log_path)
             return 0
 
     honest = get_honest_submissions(gaming_checks_dir, top_submissions_dir)
@@ -735,6 +794,19 @@ def run_improve(
     # Use only the top 1 honest submission (smallest rank)
     top_rank, top_sid, top_code = honest[0]
     log(f"Using #1 honest submission: {top_sid} (rank {top_rank})", log_path)
+
+    # Skip if the top submission is ours (nothing to improve from)
+    top_uid = _get_top_submission_uid(top_submissions_dir, top_rank, top_sid)
+    our_uids = _get_our_uids(wallets)
+    if top_uid is not None and our_uids and top_uid in our_uids:
+        log(f"Skip reason: top submission is ours (UID {top_uid}).", log_path)
+        return 0
+
+    # Skip if we've already tried 6+ times for this same top submission
+    attempts = _load_top_attempts(output_dir)
+    if attempts.get(top_sid, 0) >= MAX_ATTEMPTS_PER_TOP:
+        log(f"Skip reason: already tried {attempts.get(top_sid)} times for top_sid={top_sid} (max={MAX_ATTEMPTS_PER_TOP}).", log_path)
+        return 0
 
     # Top submission MFU (so agent knows the bar to match or exceed)
     top_mfu = _get_top_submission_mfu(top_submissions_dir, top_rank, top_sid)
@@ -749,9 +821,12 @@ def run_improve(
     improve_config = load_improve_config(work_dir)
     config_policy = improve_config.get("improvement_policy") or "circular"
     policy, next_cycle_index = resolve_effective_policy(config_policy, output_dir)
+    cycle_idx = _load_policy_cycle_index(output_dir) if config_policy == "circular" else None
     strategy_section = build_strategy_section(policy, top_mfu_section)
     code_style_section = build_code_style_section(improve_config)
     log(f"Config: no_comment={improve_config.get('no_comment')}, policy={config_policy} -> effective={policy}", log_path)
+    if config_policy == "circular" and cycle_idx is not None:
+        log(f"Circular cycle index this run: {cycle_idx} -> policy={policy}", log_path)
 
     # Build prompt inputs
     notes_section = load_notes(notes_path) if notes_path else ""
@@ -788,6 +863,8 @@ def run_improve(
     if reply is None:
         log("Cursor agent error (FAILED/TIMEOUT).", log_path)
         return 1
+
+    _increment_top_attempt(output_dir, top_sid)
 
     improved_code = extract_code(reply)
 
@@ -832,7 +909,7 @@ def run_improve(
         # Pick wallet with longest cooldown (already verified availability above)
         wallet = pick_wallet(wallets, output_dir)
         if not wallet:
-            log("No wallet available after generation. Skipping submit.", log_path)
+            log("Skip reason: no wallet available after generation (cooldown not met).", log_path)
             return 0
 
         wname = wallet["name"]

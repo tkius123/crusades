@@ -1,0 +1,47 @@
+[
+  {
+    "rank": 1,
+    "submission_id": "v3_commit_7501050_79",
+    "miner_hotkey": "5FeqPFE8yjjRLXjykYV2ED6x9LzTpEMWK6ftXpCjHczkxar6",
+    "miner_uid": 79,
+    "final_score": 48.30822093851157,
+    "num_evaluations": 5,
+    "created_at": "2026-02-08 19:39:57.750934"
+  },
+  {
+    "rank": 2,
+    "submission_id": "v3_commit_7509775_109",
+    "miner_hotkey": "5CSwzyUVo8WJW9EnH6bV29bBXABfsMCTFQtAqkT9h18N5Y8f",
+    "miner_uid": 109,
+    "final_score": 46.013714755246795,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 00:22:16.594392"
+  },
+  {
+    "rank": 3,
+    "submission_id": "v3_commit_7510303_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "final_score": 45.91772280854339,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 02:07:51.508809"
+  },
+  {
+    "rank": 4,
+    "submission_id": "v3_commit_7511170_42",
+    "miner_hotkey": "5DXUDKdt196ar6usD1iFgUsdMLH55uEo4sDbscXBjLL2Kipm",
+    "miner_uid": 42,
+    "final_score": 45.88694420740404,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 05:01:16.568941"
+  },
+  {
+    "rank": 5,
+    "submission_id": "v3_commit_7510945_241",
+    "miner_hotkey": "5GNAcRTcvmr1CgeJco6K4HpAFU7vT5B69VUcukgkrec7inCn",
+    "miner_uid": 241,
+    "final_score": 45.8787304537246,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 04:16:16.880415"
+  }
+]
