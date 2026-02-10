@@ -1,0 +1,90 @@
+{
+  "rank": 2,
+  "leaderboard_entry": {
+    "rank": 2,
+    "submission_id": "v4_commit_7515023_189",
+    "miner_hotkey": "5CJRuje5fTscnzWoLUoXuQXSJbdD9fS3PBXZxCcHzUbmMpxz",
+    "miner_uid": 189,
+    "final_score": 42.95412407174898,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 17:53:00.769592"
+  },
+  "submission_detail": {
+    "submission_id": "v4_commit_7515023_189",
+    "miner_hotkey": "5CJRuje5fTscnzWoLUoXuQXSJbdD9fS3PBXZxCcHzUbmMpxz",
+    "miner_uid": 189,
+    "code_hash": "https://gist.githubusercontent.com/Vjetdev2003/f23a6e40d195843f876ba13be76f992b/raw",
+    "bucket_path": "https://gist.githubusercontent.com/Vjetdev2003/f23a6e40d195843f876ba13be76f992b/raw",
+    "spec_version": 4,
+    "status": "finished",
+    "created_at": "2026-02-10 17:53:00.769592",
+    "updated_at": "2026-02-10 18:46:24.442942",
+    "final_score": 42.95412407174898,
+    "error_message": null,
+    "code_content": "\"\"\"\nI'm Am1l dont pls copy\n\"\"\"\n\nimport json\nimport time\nfrom dataclasses import dataclass\nfrom pathlib import Path\n\nimport torch\nimport torch.nn.functional as F\nfrom transformers import AutoConfig, AutoModelForCausalLM\n\n\n@dataclass\nclass InnerStepsResult:\n    \"\"\"Required return type from inner_steps function.\"\"\"\n\n    final_logits: torch.Tensor\n    total_tokens: int\n    final_loss: float\n\n_compiled_cache = {}\n\n\ndef inner_steps(model, data_iterator, optimizer, num_steps, device):\n    if hasattr(model, \"gradient_checkpointing_disable\"):\n        model.gradient_checkpointing_disable()\n\n    if hasattr(model, \"config\"):\n        model.config.use_cache = False\n        model.config.output_hidden_states = False\n        model.config.output_attentions = False\n\n    model_id = id(model)\n    if model_id not in _compiled_cache:\n        torch._dynamo.config.suppress_errors = True\n        _compiled_cache[model_id] = torch.compile(model, dynamic=False)\n    compiled_model = _compiled_cache[model_id]\n\n    # === Training loop ===\n    total_tokens = 0\n    final_logits = None\n    final_loss = 0.0\n    last_step = num_steps - 1\n\n    for step in range(num_steps):\n        batch = next(data_iterator)\n        batch = batch.to(device, dtype=torch.long)\n\n        input_ids = batch[:, :-1]\n        labels = batch[:, 1:]\n\n        # Forward pass through compiled model\n        outputs = compiled_model(input_ids)\n        logits = outputs.logits if hasattr(outputs, \"logits\") else outputs\n\n        # Compute loss\n        loss = F.cross_entropy(\n            logits.reshape(-1, logits.size(-1)),\n            labels.reshape(-1),\n            ignore_index=-100,\n        )\n\n        # Backward + optimizer step\n        loss.backward()\n        optimizer.step()\n        optimizer.zero_grad(set_to_none=True)\n\n        # Token count (cheap: just tensor shape, no GPU sync)\n        total_tokens += batch.numel()\n        \n        if step == last_step:\n            final_logits = logits.detach()\n            final_loss = loss.item()\n\n    return InnerStepsResult(\n        final_logits=final_logits,\n        total_tokens=total_tokens,\n        final_loss=final_loss,\n    )\n\n\n# =============================================================================\n# LOCAL TESTING - Run this file to test your implementation\n# =============================================================================\nif __name__ == \"__main__\":\n    print(\"=\" * 60)\n    print(\"TESTING train.py - Optimized Implementation\")\n    print(\"=\" * 60)\n    print()\n\n    # Load configuration\n    hparams_path = Path(__file__).parent.parent / \"hparams\" / \"hparams.json\"\n    hparams = {}\n    if hparams_path.exists():\n        with open(hparams_path) as f:\n            hparams = json.load(f)\n\n    batch_size = hparams.get(\"benchmark_batch_size\", 16)\n    num_steps = hparams.get(\"eval_steps\", 5)\n    num_evals = hparams.get(\"evaluation_runs\", 5)\n\n    print(f\"Batch size: {batch_size}\")\n    print(f\"Steps per eval: {num_steps}\")\n    print(f\"Evaluations: {num_evals}\")\n    print()\n\n    # Check paths\n    project_root = Path(__file__).parent.parent\n    model_path = project_root / \"benchmark\" / \"model\"\n    data_path = project_root / \"benchmark\" / \"data\" / \"train.pt\"\n\n    if not model_path.exists() or not data_path.exists():\n        print(\"Setup required! Run: uv run local_test/setup_benchmark.py\")\n        exit(1)\n\n    # Setup device\n    device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n    print(f\"Device: {device}\")\n    if torch.cuda.is_available():\n        print(f\"GPU: {torch.cuda.get_device_name(0)}\")\n    print()\n\n    # Load model with RANDOM initialization (same as validator)\n    print(\"Loading model (random init, same as validator)...\")\n    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)\n    model = AutoModelForCausalLM.from_config(\n        config,\n        torch_dtype=torch.bfloat16,\n        trust_remote_code=True,\n        attn_implementation=\"sdpa\",\n    )\n    model = model.to(device)\n    model.gradient_checkpointing_enable()  # Validator enables this on load\n    model.train()\n    for param in model.parameters():\n        param.requires_grad = True\n    print(f\"Parameters: {sum(p.numel() for p in model.parameters()):,}\")\n    print()\n\n    # Load data\n    print(\"Loading data...\")\n    data = torch.load(data_path, weights_only=True)\n    print(f\"Samples: {data.shape[0]:,}, Sequence length: {data.shape[1]}\")\n    print()\n\n    # Create data iterator\n    def create_iterator():\n        idx = 0\n        while True:\n            end_idx = idx + batch_size\n            if end_idx > data.shape[0]:\n                idx = 0\n                end_idx = batch_size\n            yield data[idx:end_idx]\n            idx = end_idx\n\n    # Create optimizer (same config as validator)\n    use_fused = torch.cuda.is_available()\n    optimizer = torch.optim.AdamW(\n        model.parameters(), lr=1e-4, weight_decay=0.1, betas=(0.9, 0.95), fused=use_fused\n    )\n\n    # Warmup (same as validator: 2 steps to prime torch.compile cache)\n    print(\"Warmup (compiling Triton kernels)...\")\n    _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)\n    if torch.cuda.is_available():\n        torch.cuda.synchronize()\n        torch.cuda.empty_cache()\n    print(\"Warmup done.\")\n    print()\n\n    # Reset optimizer (same config as validator)\n    optimizer = torch.optim.AdamW(\n        model.parameters(), lr=1e-4, weight_decay=0.1, betas=(0.9, 0.95), fused=use_fused\n    )\n\n    # Run evaluations\n    model_params = sum(p.numel() for p in model.parameters())\n    gpu_peak_tflops = 312.0\n    print(f\"Running {num_evals} evaluations...\")\n\n    for i in range(num_evals):\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n\n        start = time.perf_counter()\n        result = inner_steps(model, create_iterator(), optimizer, num_steps, device)\n\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n\n        elapsed = time.perf_counter() - start\n\n        # Calculate MFU\n        flops = 6 * model_params * result.total_tokens\n        actual_tflops = flops / elapsed / 1e12\n        mfu = (actual_tflops / gpu_peak_tflops) * 100\n\n        print(\n            f\"  Eval {i + 1}: {elapsed:.2f}s, tokens={result.total_tokens:,}, \"\n            f\"loss={result.final_loss:.4f}, MFU={mfu:.1f}%\"\n        )\n\n    print()\n    print(\"Done!\")\n",
+    "payment_verified": 1
+  },
+  "evaluations": [
+    {
+      "evaluation_id": "68834d99-74db-4c54-aa97-de77c3faa892",
+      "submission_id": "v4_commit_7515023_189",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 42.95412407174898,
+      "tokens_per_second": 7238.038981191018,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.8294956760000787,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:34:53.862594"
+    },
+    {
+      "evaluation_id": "9136ed6e-9859-4779-9c49-16837ae29416",
+      "submission_id": "v4_commit_7515023_189",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 0.0,
+      "tokens_per_second": 0.0,
+      "total_tokens": 0,
+      "wall_time_seconds": 2.825639841999873,
+      "success": 0,
+      "error": "Gradient relative error 0.066104 exceeds threshold 0.060000 (|g - g_truth| / |g_truth|)",
+      "created_at": "2026-02-10 18:37:50.096485"
+    },
+    {
+      "evaluation_id": "de26b62d-7c5a-4a6d-891b-952c6ec3e44e",
+      "submission_id": "v4_commit_7515023_189",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 43.10632433367786,
+      "tokens_per_second": 7263.685678745566,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.8195052629998827,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:40:49.575643"
+    },
+    {
+      "evaluation_id": "320d93f6-ba91-475e-9e46-f916630615eb",
+      "submission_id": "v4_commit_7515023_189",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 42.846108632116795,
+      "tokens_per_second": 7219.8377029779585,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.8366288609995536,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:43:41.747191"
+    },
+    {
+      "evaluation_id": "d663ace1-d302-4a09-8f7c-eeee655550bb",
+      "submission_id": "v4_commit_7515023_189",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 43.00535905834856,
+      "tokens_per_second": 7246.672397381491,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.8261247200025537,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:46:24.426846"
+    }
+  ],
+  "fetched_at": "2026-02-10T18:52:17.888211"
+}

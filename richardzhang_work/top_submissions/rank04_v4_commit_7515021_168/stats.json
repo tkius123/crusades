@@ -1,0 +1,90 @@
+{
+  "rank": 4,
+  "leaderboard_entry": {
+    "rank": 4,
+    "submission_id": "v4_commit_7515021_168",
+    "miner_hotkey": "5ExoeQ78ttifSHvWZjFwjftm5YEiZnyCDiP2VxMWmRv6j24S",
+    "miner_uid": 168,
+    "final_score": 38.36571409959211,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 17:53:00.708276"
+  },
+  "submission_detail": {
+    "submission_id": "v4_commit_7515021_168",
+    "miner_hotkey": "5ExoeQ78ttifSHvWZjFwjftm5YEiZnyCDiP2VxMWmRv6j24S",
+    "miner_uid": 168,
+    "code_hash": "https://gist.githubusercontent.com/algo-experter/4f89c0a10ce09e8d72c3c5a5b9584770/raw",
+    "bucket_path": "https://gist.githubusercontent.com/algo-experter/4f89c0a10ce09e8d72c3c5a5b9584770/raw",
+    "spec_version": 4,
+    "status": "finished",
+    "created_at": "2026-02-10 17:53:00.708276",
+    "updated_at": "2026-02-10 18:04:12.851284",
+    "final_score": 38.36571409959211,
+    "error_message": null,
+    "code_content": "\"\"\"\nOptimized train.py for Templar Crusades TPS benchmark.\n\"\"\"\n\nimport json\nimport time\nfrom dataclasses import dataclass\nfrom pathlib import Path\n\nimport torch\nimport torch.nn.functional as F\nfrom transformers import AutoConfig, AutoModelForCausalLM\n\n\n@dataclass\nclass InnerStepsResult:\n    \"\"\"Required return type from inner_steps function.\n\n    All fields are verified by the validator:\n    - final_logits: Must be a 3D tensor (batch, seq_len-1, vocab), NOT None\n    - total_tokens: Should equal batch_size * seq_len * num_steps\n    - final_loss: Must be a positive float, close to reference loss\n    \"\"\"\n\n    final_logits: torch.Tensor  # Output logits from last forward pass\n    total_tokens: int  # Total tokens processed across all steps\n    final_loss: float  # Loss value from last training step\n\n\ndef inner_steps(model, data_iterator, optimizer, num_steps, device):\n    \"\"\"\n    Run training steps and return results.\n\n    This is the function the validator calls. It receives:\n    - model: Pre-loaded model (already on device, in train mode, with gradient checkpointing)\n    - data_iterator: Infinite iterator yielding batches of shape (batch_size, seq_len)\n    - optimizer: Pre-configured AdamW optimizer (wrapped by validator for gradient capture)\n    - num_steps: Number of training steps to run (must complete all of them)\n    - device: Target device (cuda or cpu)\n\n    The validator measures wall_time of this function and calculates:\n        MFU = (6 * model_params * batch_size * seq_len * num_steps) / (wall_time * gpu_peak_tflops)\n\n    Higher MFU = you completed the same training faster = better score.\n\n    Returns:\n        InnerStepsResult with outputs for verification\n    \"\"\"\n    total_tokens = 0\n    final_logits = None\n    final_loss = 0.0\n\n    for step in range(num_steps):\n        # Get batch - shape: (batch_size, seq_len)\n        batch = next(data_iterator)\n        batch = batch.to(device, dtype=torch.long)\n\n        # Prepare inputs and labels (causal LM: predict next token)\n        # input_ids: all tokens except last, labels: all tokens except first\n        input_ids = batch[:, :-1]\n        labels = batch[:, 1:]\n\n        # Forward pass\n        outputs = model(input_ids)\n        logits = outputs.logits if hasattr(outputs, \"logits\") else outputs\n\n        # Compute loss\n        loss = F.cross_entropy(\n            logits.reshape(-1, logits.size(-1)),\n            labels.reshape(-1),\n            ignore_index=-100,\n        )\n\n        # Backward pass\n        loss.backward()\n\n        # Update weights - MUST use the provided optimizer\n        optimizer.step()\n        optimizer.zero_grad(set_to_none=True)\n\n        # Track metrics\n        total_tokens += batch.numel()\n        # Keep logits from the last step for verification\n        final_logits = logits.detach().float()\n        final_loss = loss.item()\n\n    return InnerStepsResult(\n        final_logits=final_logits,\n        total_tokens=total_tokens,\n        final_loss=final_loss,\n    )",
+    "payment_verified": 1
+  },
+  "evaluations": [
+    {
+      "evaluation_id": "fba649de-8f0e-4867-9de2-89fca9dee15f",
+      "submission_id": "v4_commit_7515021_168",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 38.35594425401237,
+      "tokens_per_second": 6463.216877783422,
+      "total_tokens": 20480,
+      "wall_time_seconds": 3.168700723999791,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 17:55:11.228457"
+    },
+    {
+      "evaluation_id": "86037796-2810-4c2d-9ad2-73f0a34e6c1a",
+      "submission_id": "v4_commit_7515021_168",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 38.37824026606897,
+      "tokens_per_second": 6466.973895482613,
+      "total_tokens": 20480,
+      "wall_time_seconds": 3.1668598529995506,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 17:57:33.345592"
+    },
+    {
+      "evaluation_id": "1922fece-adbf-4d19-b318-2cec1f3b976f",
+      "submission_id": "v4_commit_7515021_168",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 38.36346773911115,
+      "tokens_per_second": 6464.4846321515115,
+      "total_tokens": 20480,
+      "wall_time_seconds": 3.1680793079995055,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 17:59:45.862342"
+    },
+    {
+      "evaluation_id": "548076c1-feb9-4ed0-9ad7-3b266bf75a71",
+      "submission_id": "v4_commit_7515021_168",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 38.36970531251238,
+      "tokens_per_second": 6465.535702343299,
+      "total_tokens": 20480,
+      "wall_time_seconds": 3.1675642890004383,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:02:00.708789"
+    },
+    {
+      "evaluation_id": "27d29145-095c-4d2c-a7f3-ef33a981e357",
+      "submission_id": "v4_commit_7515021_168",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 38.36571409959211,
+      "tokens_per_second": 6464.863157964303,
+      "total_tokens": 20480,
+      "wall_time_seconds": 3.1678938129989547,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:04:12.835047"
+    }
+  ],
+  "fetched_at": "2026-02-10T18:52:18.619318"
+}

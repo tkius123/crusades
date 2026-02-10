@@ -1,0 +1,90 @@
+{
+  "rank": 3,
+  "leaderboard_entry": {
+    "rank": 3,
+    "submission_id": "v4_commit_7514934_154",
+    "miner_hotkey": "5HGhEk1dPbPCNNjA24aox2v8XAPKizZ1Mt48LpPFA4L9h6sN",
+    "miner_uid": 154,
+    "final_score": 42.43019252459745,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 17:53:00.714774"
+  },
+  "submission_detail": {
+    "submission_id": "v4_commit_7514934_154",
+    "miner_hotkey": "5HGhEk1dPbPCNNjA24aox2v8XAPKizZ1Mt48LpPFA4L9h6sN",
+    "miner_uid": 154,
+    "code_hash": "https://pastebin.com/raw/XQJjWDXK",
+    "bucket_path": "https://pastebin.com/raw/XQJjWDXK",
+    "spec_version": 4,
+    "status": "finished",
+    "created_at": "2026-02-10 17:53:00.714774",
+    "updated_at": "2026-02-10 18:17:54.559162",
+    "final_score": 42.43019252459745,
+    "error_message": null,
+    "code_content": "\"\"\"\r\nReference training implementation for Templar Crusades.\r\n\r\nThis is the baseline implementation. Miners should optimize it for maximum MFU\r\n(Model FLOPs Utilization) while passing all verification checks.\r\n\r\nUsage:\r\n    1. Run setup: uv run local_test/setup_benchmark.py\r\n    2. Test locally: uv run local_test/train.py\r\n    3. Verify locally: uv run local_test/verify.py\r\n    4. Submit this file (or your optimized version) as a GitHub Gist!\r\n\r\n=== SUBMISSION ===\r\n\r\nYou can submit this entire file as-is. The validator only calls the inner_steps\r\nfunction \u2014 the `if __name__ == \"__main__\":` block is for local testing and is\r\nignored during evaluation.\r\n\r\n=== VERIFICATION RULES ===\r\n\r\nYour inner_steps function MUST:\r\n  - Use the provided optimizer (call optimizer.step() and optimizer.zero_grad())\r\n  - Process ALL tokens in each batch (no truncation)\r\n  - Return actual final_logits tensor (not None)\r\n  - Return logits with correct shape: (batch_size, seq_len - 1, vocab_size)\r\n  - Produce gradients that closely match the reference implementation\r\n  - Train all model parameters (don't freeze layers)\r\n  - Call optimizer.step() for each training step\r\n\r\nYour inner_steps function MUST NOT:\r\n  - Access optimizer internals (e.g., optimizer.optimizer)\r\n  - Truncate or skip parts of input sequences\r\n  - Return None for final_logits\r\n  - Report inflated token counts\r\n  - Modify the model's requires_grad settings\r\n  - Modify torch backend settings (deterministic, benchmark, SDP toggles, etc.)\r\n\"\"\"\r\n\r\nimport json\r\nimport time\r\nfrom dataclasses import dataclass\r\nfrom pathlib import Path\r\n\r\nimport torch\r\nimport torch.nn.functional as F\r\nfrom transformers import AutoConfig, AutoModelForCausalLM\r\n\r\n\r\n@dataclass\r\nclass InnerStepsResult:\r\n    \"\"\"Required return type from inner_steps function.\r\n\r\n    All fields are verified by the validator:\r\n    - final_logits: Must be a 3D tensor (batch, seq_len-1, vocab), NOT None\r\n    - total_tokens: Should equal batch_size * seq_len * num_steps\r\n    - final_loss: Must be a positive float, close to reference loss\r\n    \"\"\"\r\n\r\n    final_logits: torch.Tensor  # Output logits from last forward pass\r\n    total_tokens: int  # Total tokens processed across all steps\r\n    final_loss: float  # Loss value from last training step\r\n\r\n\r\ndef inner_steps(model, data_iterator, optimizer, num_steps, device):\r\n    \"\"\"\r\n    Run training steps and return results.\r\n\r\n    This is the function the validator calls. It receives:\r\n    - model: Pre-loaded model (already on device, in train mode, with gradient checkpointing)\r\n    - data_iterator: Infinite iterator yielding batches of shape (batch_size, seq_len)\r\n    - optimizer: Pre-configured AdamW optimizer (wrapped by validator for gradient capture)\r\n    - num_steps: Number of training steps to run (must complete all of them)\r\n    - device: Target device (cuda or cpu)\r\n\r\n    The validator measures wall_time of this function and calculates:\r\n        MFU = (6 * model_params * batch_size * seq_len * num_steps) / (wall_time * gpu_peak_tflops)\r\n\r\n    Higher MFU = you completed the same training faster = better score.\r\n\r\n    Returns:\r\n        InnerStepsResult with outputs for verification\r\n    \"\"\"\r\n    total_tokens = 0\r\n    final_logits = None\r\n    final_loss = 0.0\r\n\r\n    model = torch.compile(model)\r\n\r\n    for step in range(num_steps):\r\n        # Get batch - shape: (batch_size, seq_len)\r\n        batch = next(data_iterator)\r\n        batch = batch.to(device, dtype=torch.long)\r\n\r\n        # Prepare inputs and labels (causal LM: predict next token)\r\n        # input_ids: all tokens except last, labels: all tokens except first\r\n        input_ids = batch[:, :-1]\r\n        labels = batch[:, 1:]\r\n\r\n        # Forward pass\r\n        outputs = model(input_ids)\r\n        logits = outputs.logits if hasattr(outputs, \"logits\") else outputs\r\n\r\n        # Compute loss\r\n        loss = F.cross_entropy(\r\n            logits.reshape(-1, logits.size(-1)),\r\n            labels.reshape(-1),\r\n            ignore_index=-100,\r\n        )\r\n\r\n        # Backward pass\r\n        loss.backward()\r\n\r\n        # Update weights - MUST use the provided optimizer\r\n        optimizer.step()\r\n        optimizer.zero_grad(set_to_none=True)\r\n\r\n        # Track metrics\r\n        total_tokens += batch.numel()\r\n        # Keep logits from the last step for verification\r\n        final_logits = logits.detach().float()\r\n        final_loss = loss.item()\r\n\r\n    return InnerStepsResult(\r\n        final_logits=final_logits,\r\n        total_tokens=total_tokens,\r\n        final_loss=final_loss,\r\n    )",
+    "payment_verified": 1
+  },
+  "evaluations": [
+    {
+      "evaluation_id": "edf71ce6-5320-4fa4-b044-9e8eafc66598",
+      "submission_id": "v4_commit_7514934_154",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 42.230316856591514,
+      "tokens_per_second": 7116.072931332195,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.877991863999341,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:06:56.908354"
+    },
+    {
+      "evaluation_id": "10db3c6f-052a-4c4b-b24d-5eb3e15c55ac",
+      "submission_id": "v4_commit_7514934_154",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 0.0,
+      "tokens_per_second": 0.0,
+      "total_tokens": 0,
+      "wall_time_seconds": 2.8415347860009206,
+      "success": 0,
+      "error": "Gradient relative error 0.069030 exceeds threshold 0.060000 (|g - g_truth| / |g_truth|)",
+      "created_at": "2026-02-10 18:09:36.747167"
+    },
+    {
+      "evaluation_id": "8876c4d3-a443-413d-9ae2-026263ed7c1a",
+      "submission_id": "v4_commit_7514934_154",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 42.43019252459745,
+      "tokens_per_second": 7149.7532334610905,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.86443452399908,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:12:23.846738"
+    },
+    {
+      "evaluation_id": "96202b07-dbae-4257-879b-57d251e46aa4",
+      "submission_id": "v4_commit_7514934_154",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 0.0,
+      "tokens_per_second": 0.0,
+      "total_tokens": 0,
+      "wall_time_seconds": 2.8625150160005433,
+      "success": 0,
+      "error": "Gradient relative error 0.067914 exceeds threshold 0.060000 (|g - g_truth| / |g_truth|)",
+      "created_at": "2026-02-10 18:15:05.073529"
+    },
+    {
+      "evaluation_id": "4b1a7cc3-2cf9-47de-b9db-17e2a0596133",
+      "submission_id": "v4_commit_7514934_154",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 42.887021717929805,
+      "tokens_per_second": 7226.73181422699,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.8339227919987025,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 18:17:54.543422"
+    }
+  ],
+  "fetched_at": "2026-02-10T18:52:18.253331"
+}
