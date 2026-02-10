@@ -675,6 +675,7 @@ def record_submission(
     submit_status: str = "submitted",
     error: str = "",
     policy: str = "",
+    top_sid: str = "",
 ) -> None:
     """Record a submission attempt (success or failure) in cooldown history + submissions log."""
     now = datetime.now().isoformat()
@@ -703,6 +704,8 @@ def record_submission(
         entry["policy"] = policy
     if error:
         entry["error"] = error
+    if top_sid:
+        entry["top_sid"] = top_sid
     submissions.append(entry)
     submissions_file.write_text(json.dumps(submissions, indent=2))
 

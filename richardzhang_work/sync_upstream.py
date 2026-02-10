@@ -133,7 +133,21 @@ def run_sync(
     log_both("uv sync done.")
 
     if push:
-        run(["git", "push", "origin", "main"])
+        push_cmd = ["git", "push", "origin", "main"]
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if token:
+            url_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            if url_result.returncode == 0 and url_result.stdout.strip():
+                remote = url_result.stdout.strip()
+                if remote.startswith("https://") and "@" not in remote:
+                    push_url = remote.replace("https://", f"https://{token}@", 1)
+                    push_cmd = ["git", "push", push_url, "main"]
+        run(push_cmd)
         log_both("Pushed main to origin.")
 
     return 0

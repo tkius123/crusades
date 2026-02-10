@@ -107,8 +107,25 @@ def git_push(log_path: Path | None) -> bool:
     cmds = [
         ["git", "add", "richardzhang_work/"],
         ["git", "commit", "-m", f"auto: update richardzhang_work {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
-        ["git", "push", "origin", "HEAD"],
     ]
+    # Push: use GITHUB_TOKEN in URL so GitHub accepts (no password auth)
+    push_cmd = ["git", "push", "origin", "HEAD"]
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        url_result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
+        if url_result.returncode == 0 and url_result.stdout.strip():
+            remote = url_result.stdout.strip()
+            # https://github.com/user/repo.git -> https://TOKEN@github.com/user/repo.git
+            if remote.startswith("https://") and "@" not in remote:
+                push_url = remote.replace("https://", f"https://{token}@", 1)
+                push_cmd = ["git", "push", push_url, "HEAD"]
+    cmds.append(push_cmd)
+
     for cmd in cmds:
         r = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True)
         if r.returncode != 0:
