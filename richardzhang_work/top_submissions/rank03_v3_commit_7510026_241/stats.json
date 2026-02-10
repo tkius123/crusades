@@ -1,0 +1,90 @@
+{
+  "rank": 3,
+  "leaderboard_entry": {
+    "rank": 3,
+    "submission_id": "v3_commit_7510026_241",
+    "miner_hotkey": "5GNAcRTcvmr1CgeJco6K4HpAFU7vT5B69VUcukgkrec7inCn",
+    "miner_uid": 241,
+    "final_score": 45.864765300293826,
+    "num_evaluations": 5,
+    "created_at": "2026-02-10 01:12:28.722093"
+  },
+  "submission_detail": {
+    "submission_id": "v3_commit_7510026_241",
+    "miner_hotkey": "5GNAcRTcvmr1CgeJco6K4HpAFU7vT5B69VUcukgkrec7inCn",
+    "miner_uid": 241,
+    "code_hash": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/a8a615d3fd08d171b4bfbb04c8d4e6bd603685c2/train.py",
+    "bucket_path": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/a8a615d3fd08d171b4bfbb04c8d4e6bd603685c2/train.py",
+    "spec_version": 3,
+    "status": "finished",
+    "created_at": "2026-02-10 01:12:28.722093",
+    "updated_at": "2026-02-10 01:27:01.611930",
+    "final_score": 45.864765300293826,
+    "error_message": null,
+    "code_content": "import gc\nimport os\nfrom dataclasses import dataclass\n\nimport torch\nimport torch.nn.functional as F\n\n\n@dataclass\nclass InnerStepsResult:\n    final_logits: torch.Tensor\n    total_tokens: int\n    final_loss: float\n\n\n_initialized = False\n_train_fn = None\n_pf_stream = None\n\n\ndef inner_steps(model, data_iterator, optimizer, num_steps, device):\n    global _initialized, _train_fn, _pf_stream\n\n    is_cuda = str(device).startswith(\"cuda\")\n\n    if not _initialized:\n        _initialized = True\n\n        if is_cuda:\n            os.environ.setdefault(\"PYTORCH_CUDA_ALLOC_CONF\", \"expandable_segments:True\")\n            torch.set_float32_matmul_precision(\"high\")\n            torch.backends.cuda.matmul.allow_tf32 = True\n            torch.backends.cudnn.allow_tf32 = True\n            torch.backends.cudnn.benchmark = True\n            torch.backends.cudnn.deterministic = False\n            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True\n\n            torch.backends.cuda.enable_flash_sdp(True)\n            torch.backends.cuda.enable_mem_efficient_sdp(True)\n            torch.backends.cuda.enable_math_sdp(False)\n\n            try:\n                import torch._inductor.config as inductor_config\n                inductor_config.coordinate_descent_tuning = True\n                inductor_config.fx_graph_cache = True\n            except Exception:\n                pass\n\n            try:\n                torch._dynamo.config.cache_size_limit = 64\n            except Exception:\n                pass\n\n            for obj in gc.get_objects():\n                if isinstance(obj, torch.optim.Optimizer) and obj is not optimizer:\n                    obj.state.clear()\n            gc.collect()\n            torch.cuda.empty_cache()\n\n            _pf_stream = torch.cuda.Stream()\n\n    if hasattr(model, \"config\"):\n        model.config.use_cache = False\n\n    if hasattr(model, \"gradient_checkpointing_disable\"):\n        model.gradient_checkpointing_disable()\n\n    if is_cuda:\n        try:\n            for group in optimizer.param_groups:\n                if not group.get(\"fused\", False):\n                    group[\"fused\"] = True\n                    group[\"foreach\"] = False\n        except Exception:\n            pass\n\n    if _train_fn is None:\n        dev_type = device.type\n\n        def _eager_step(input_ids, labels):\n            with torch.autocast(device_type=dev_type, dtype=torch.bfloat16):\n                logits = model(input_ids).logits\n                loss = F.cross_entropy(\n                    logits.reshape(-1, logits.size(-1)),\n                    labels.reshape(-1),\n                    ignore_index=-100,\n                )\n            loss.backward()\n            return loss.detach(), logits.detach()\n\n        if is_cuda:\n            try:\n                _train_fn = torch.compile(\n                    _eager_step,\n                    mode=\"max-autotune\",\n                    fullgraph=False,\n                    dynamic=False,\n                )\n            except Exception:\n                try:\n                    _train_fn = torch.compile(\n                        _eager_step,\n                        mode=\"reduce-overhead\",\n                        fullgraph=False,\n                    )\n                except Exception:\n                    _train_fn = _eager_step\n        else:\n            _train_fn = _eager_step\n\n    gc_was_enabled = gc.isenabled()\n    if gc_was_enabled:\n        gc.disable()\n\n    try:\n        pf = _pf_stream\n        if is_cuda and pf is not None:\n            with torch.cuda.stream(pf):\n                next_batch = next(data_iterator).to(device, non_blocking=True)\n        else:\n            next_batch = next(data_iterator).to(device)\n\n        total_tokens = 0\n        final_loss = 0.0\n        final_logits = None\n\n        for step in range(num_steps):\n            if is_cuda and pf is not None:\n                torch.cuda.current_stream().wait_stream(pf)\n            batch = next_batch\n\n            if step < num_steps - 1:\n                nb = next(data_iterator)\n                if is_cuda and pf is not None:\n                    with torch.cuda.stream(pf):\n                        next_batch = nb.to(device, non_blocking=True)\n                else:\n                    next_batch = nb.to(device)\n\n            loss, logits = _train_fn(batch[:, :-1], batch[:, 1:])\n\n            optimizer.step()\n            optimizer.zero_grad(set_to_none=True)\n\n            total_tokens += batch.numel()\n\n            if step == num_steps - 1:\n                final_logits = logits.float()\n                final_loss = loss.item()\n            else:\n                del loss, logits\n\n    finally:\n        if gc_was_enabled:\n            gc.enable()\n\n    return InnerStepsResult(\n        final_logits=final_logits,\n        total_tokens=total_tokens,\n        final_loss=final_loss,\n    )\n\n\nif __name__ == \"__main__\":\n    import json\n    import time\n    from pathlib import Path\n\n    from transformers import AutoModelForCausalLM\n\n    print(\"=\" * 60)\n    print(\"TESTING train_agent_output.py\")\n    print(\"=\" * 60)\n    print()\n\n    hparams_path = Path(__file__).parent.parent / \"hparams\" / \"hparams.json\"\n    hparams = {}\n    if hparams_path.exists():\n        with open(hparams_path) as f:\n            hparams = json.load(f)\n\n    batch_size = hparams.get(\"benchmark_batch_size\", 16)\n    num_steps = hparams.get(\"eval_steps\", 5)\n    num_evals = hparams.get(\"evaluation_runs\", 5)\n\n    print(f\"Batch size: {batch_size}\")\n    print(f\"Steps per eval: {num_steps}\")\n    print(f\"Evaluations: {num_evals}\")\n    print()\n\n    project_root = Path(__file__).parent.parent\n    model_path = project_root / \"benchmark\" / \"model\"\n    data_path = project_root / \"benchmark\" / \"data\" / \"train.pt\"\n\n    if not model_path.exists() or not data_path.exists():\n        print(\"Setup required! Run: uv run local_test/setup_benchmark.py\")\n        exit(1)\n\n    device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n    print(f\"Device: {device}\")\n    if torch.cuda.is_available():\n        print(f\"GPU: {torch.cuda.get_device_name(0)}\")\n    print()\n\n    attn_impl = \"sdpa\"\n    try:\n        import flash_attn\n        attn_impl = \"flash_attention_2\"\n    except ImportError:\n        pass\n\n    print(f\"Loading model (attn={attn_impl})...\")\n    model = AutoModelForCausalLM.from_pretrained(\n        model_path,\n        torch_dtype=torch.bfloat16,\n        device_map=\"auto\",\n        trust_remote_code=True,\n        attn_implementation=attn_impl,\n    )\n    model.gradient_checkpointing_enable()\n    model.train()\n    print(f\"Parameters: {sum(p.numel() for p in model.parameters()):,}\")\n    print()\n\n    print(\"Loading data...\")\n    data = torch.load(data_path, weights_only=True)\n    if torch.cuda.is_available():\n        data = data.pin_memory()\n    print(f\"Samples: {data.shape[0]:,}, Sequence length: {data.shape[1]}\")\n    print()\n\n    def create_iterator():\n        idx = 0\n        while True:\n            end_idx = idx + batch_size\n            if end_idx > data.shape[0]:\n                idx = 0\n                end_idx = batch_size\n            yield data[idx:end_idx]\n            idx = end_idx\n\n    use_fused = torch.cuda.is_available()\n    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=use_fused)\n\n    print(\"Warmup (compile)...\")\n    t0 = time.perf_counter()\n    _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)\n    if torch.cuda.is_available():\n        torch.cuda.synchronize()\n    t1 = time.perf_counter()\n    print(f\"  Warmup: {t1 - t0:.1f}s\")\n\n    if torch.cuda.is_available():\n        torch.cuda.empty_cache()\n    print()\n\n    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=use_fused)\n\n    print(f\"Running {num_evals} evaluations...\")\n    tps_list = []\n\n    for i in range(num_evals):\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n\n        start = time.perf_counter()\n        result = inner_steps(model, create_iterator(), optimizer, num_steps, device)\n\n        if torch.cuda.is_available():\n            torch.cuda.synchronize()\n\n        elapsed = time.perf_counter() - start\n        tps = result.total_tokens / elapsed\n        tps_list.append(tps)\n        print(\n            f\"  Eval {i + 1}: {elapsed:.2f}s, \"\n            f\"TPS={tps:,.0f}, \"\n            f\"tokens={result.total_tokens:,}, \"\n            f\"loss={result.final_loss:.4f}\"\n        )\n\n    print()\n    tps_list.sort()\n    median_tps = tps_list[len(tps_list) // 2]\n    print(f\"Median TPS: {median_tps:,.0f}\")\n    print(\"Done!\")",
+    "payment_verified": 1
+  },
+  "evaluations": [
+    {
+      "evaluation_id": "2a083006-c026-4266-bc40-ab5c7b05bfbb",
+      "submission_id": "v3_commit_7510026_241",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.864765300293826,
+      "tokens_per_second": 7728.500261166818,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.6499319800641388,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 01:15:34.577818"
+    },
+    {
+      "evaluation_id": "da8fb983-feaa-40d5-b79e-15d7d4f2c2ef",
+      "submission_id": "v3_commit_7510026_241",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.81543790696337,
+      "tokens_per_second": 7720.188286391823,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.652785041020252,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 01:18:25.199094"
+    },
+    {
+      "evaluation_id": "cd017d50-165f-4f77-b4ac-61312c0290e9",
+      "submission_id": "v3_commit_7510026_241",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.901180144206364,
+      "tokens_per_second": 7734.636390477539,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.647829706023913,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 01:21:26.976912"
+    },
+    {
+      "evaluation_id": "e3cd444b-37c1-4cee-a9d9-da8031486da8",
+      "submission_id": "v3_commit_7510026_241",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.84024661082303,
+      "tokens_per_second": 7724.368708399945,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.651349355932325,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 01:24:15.935789"
+    },
+    {
+      "evaluation_id": "b718078e-5e5a-4f57-97d0-05651e369471",
+      "submission_id": "v3_commit_7510026_241",
+      "evaluator_hotkey": "5HdTZQ6UXD7MWcRsMeExVwqAKKo4UwomUd662HvtXiZXkxmv",
+      "mfu": 45.98265807646564,
+      "tokens_per_second": 7748.36593246085,
+      "total_tokens": 20480,
+      "wall_time_seconds": 2.6431379439891316,
+      "success": 1,
+      "error": null,
+      "created_at": "2026-02-10 01:27:01.595607"
+    }
+  ],
+  "fetched_at": "2026-02-10T01:27:30.709542"
+}
