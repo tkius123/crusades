@@ -67,16 +67,18 @@ Higher MFU = more efficient use of GPU compute.
 
 ### Verification Checks
 
-Each submission is verified to prevent cheating:
+Each submission undergoes the following verification checks:
 
 | Check | Description | Threshold |
 |-------|-------------|-----------|
 | **Logits Present** | Must return actual logits (not None) | Required |
 | **Logits Shape** | Logits must be 3D (batch, seq, vocab) | Required |
 | **Sequence Length** | Logits seq dim must match expected | `seq_len - 1` |
+| **Token Count** | Must process the expected number of tokens | Exact match |
 | **Loss Validity** | Loss must be positive, not NaN, close to reference | `max_loss_difference: 0.3` |
 | **Gradient Relative Error** | `\|g - g_truth\| / \|g_truth\|` must be small | `gradient_norm_ratio_max - 1.0` |
 | **Gradient Coverage** | All layers must have gradients | `100%` |
+| **Final Weight Verification** | Model weights after training must match reference | `weight_relative_error_max: 0.02` |
 | **Trainable Params** | All params must be trainable | `100%` |
 | **Params Changed** | Most param elements must change during training | `min: 80%` |
 | **Success Rate** | Majority of runs must pass | `min_success_rate: 0.5` |
@@ -101,11 +103,11 @@ Example:
 ### Weight Distribution
 
 ```
-Winner (Rank #1):  5% of emissions
-Validator (Burn):  95% of emissions
+Winner (Rank #1):  (1 - burn_rate) of emissions
+Burn UID:          burn_rate of emissions
 ```
 
-Only the threshold-adjusted rank #1 receives emissions. All others get nothing.
+Only the threshold-adjusted rank #1 receives the non-burn portion of emissions. All others get nothing.
 
 ---
 
@@ -197,9 +199,8 @@ Edit `hparams/hparams.json`:
     "verification": {
         "max_loss_difference": 0.3,
         "min_params_changed_ratio": 0.8,
-        "gradient_cosine_min": 0.95,
-        "gradient_norm_ratio_min": 0.9,
-        "gradient_norm_ratio_max": 1.1
+        "gradient_norm_ratio_max": 1.04,
+        "weight_relative_error_max": 0.02
     },
     
     "adaptive_threshold": {
@@ -213,7 +214,7 @@ Edit `hparams/hparams.json`:
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `netuid` | Subnet ID for Crusades | `3` |
-| `burn_rate` | % of emissions to validator | `0.95` (95%) |
+| `burn_rate` | % of emissions to burn_uid | `0.95` (95%) |
 | `evaluation_runs` | Number of evaluation runs per submission | `5` |
 | `min_success_rate` | Minimum passing runs to accept | `0.5` (50%) |
 | `gpu_devices` | Which GPUs to use | `"0"` |
@@ -308,7 +309,7 @@ Edit `hparams/hparams.json`:
         "ttl_seconds": 3600,
         "gpu_count": 1,
         "gpu_models": ["A100"],
-        "min_gpu_memory_gb": 64,
+        "min_gpu_memory_gb": 80,
         "cpu": "4",
         "memory": "32Gi"
     }

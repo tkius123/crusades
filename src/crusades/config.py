@@ -26,13 +26,12 @@ class StorageConfig(BaseModel):
 
 
 class VerificationConfig(BaseModel):
-    """Verification settings using gradient-based checks."""
+    """Verification settings using gradient and weight-based checks."""
 
     max_loss_difference: float = 0.5
     min_params_changed_ratio: float = 0.8
-    gradient_cosine_min: float = 0.8
-    gradient_norm_ratio_min: float = 0.5
-    gradient_norm_ratio_max: float = 2.0
+    gradient_norm_ratio_max: float = 1.04
+    weight_relative_error_max: float = 0.04
 
 
 class MFUConfig(BaseModel):
@@ -103,7 +102,7 @@ class HParams(BaseModel):
     - All settings are defined in hparams.json (no hardcoded defaults)
 
     Versioning:
-    - Competition version is derived from __version__ major number
+    - Competition version is derived from __version__ major.minor number
     - Use crusades.COMPETITION_VERSION to get the current competition version
     """
 
@@ -167,7 +166,7 @@ class HParams(BaseModel):
 
         Raises:
             FileNotFoundError: If hparams.json doesn't exist
-            ValidationError: If required fields are missing
+            pydantic.ValidationError: If required fields are missing
         """
         if path is None:
             # Default to hparams/hparams.json relative to project root

@@ -7,7 +7,14 @@ This is the baseline implementation. Miners should optimize it for maximum MFU
 Usage:
     1. Run setup: uv run local_test/setup_benchmark.py
     2. Test locally: uv run local_test/train.py
-    3. Submit when ready!
+    3. Verify locally: uv run local_test/verify.py
+    4. Submit this file (or your optimized version) as a GitHub Gist!
+
+=== SUBMISSION ===
+
+You can submit this entire file as-is. The validator only calls the inner_steps
+function — the `if __name__ == "__main__":` block is for local testing and is
+ignored during evaluation.
 
 === VERIFICATION RULES ===
 
@@ -26,6 +33,7 @@ Your inner_steps function MUST NOT:
   - Return None for final_logits
   - Report inflated token counts
   - Modify the model's requires_grad settings
+  - Modify torch backend settings (deterministic, benchmark, SDP toggles, etc.)
 """
 
 import json
@@ -35,7 +43,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 @dataclass
@@ -79,7 +87,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     for step in range(num_steps):
         # Get batch - shape: (batch_size, seq_len)
         batch = next(data_iterator)
-        batch = batch.to(device)
+        batch = batch.to(device, dtype=torch.long)
 
         # Prepare inputs and labels (causal LM: predict next token)
         # input_ids: all tokens except last, labels: all tokens except first
@@ -158,16 +166,20 @@ if __name__ == "__main__":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
-    # Load model
-    print("Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
+    # Load model with RANDOM initialization (same as validator)
+    print("Loading model (random init, same as validator)...")
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_config(
+        config,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
         trust_remote_code=True,
+        attn_implementation="sdpa",
     )
+    model = model.to(device)
     model.gradient_checkpointing_enable()  # Required to fit in GPU memory
     model.train()
+    for param in model.parameters():
+        param.requires_grad = True
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 
@@ -188,8 +200,11 @@ if __name__ == "__main__":
             yield data[idx:end_idx]
             idx = end_idx
 
-    # Create optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Create optimizer (same config as validator)
+    use_fused = torch.cuda.is_available()
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=1e-4, weight_decay=0.1, betas=(0.9, 0.95), fused=use_fused
+    )
 
     # Warmup
     print("Warmup...")
@@ -199,8 +214,10 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
     print()
 
-    # Reset optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Reset optimizer (same config as validator)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=1e-4, weight_decay=0.1, betas=(0.9, 0.95), fused=use_fused
+    )
 
     # Run evaluations
     print(f"Running {num_evals} evaluations...")

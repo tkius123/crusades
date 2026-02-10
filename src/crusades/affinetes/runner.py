@@ -88,7 +88,7 @@ class EvaluationResult:
         return cls(success=False, error=error, error_code=error_code, task_id=task_id)
 
     def is_verification_failure(self) -> bool:
-        """Check if this result failed due to verification/anti-cheat checks."""
+        """Check if this result failed due to verification checks."""
         if not self.error_code:
             return False
         try:
@@ -155,7 +155,6 @@ class AffinetesRunner:
     def __init__(
         self,
         mode: Literal["docker", "basilica"] = "docker",
-        basilica_endpoint: str | None = None,
         basilica_api_key: str | None = None,
         docker_gpu_devices: str = "all",
         docker_memory_limit: str = "32g",
@@ -165,11 +164,11 @@ class AffinetesRunner:
         data_url: str | None = None,
         # Verification settings
         max_loss_difference: float = 0.5,
-        min_params_changed_ratio: float = 0.5,
+        min_params_changed_ratio: float = 0.8,
         # Gradient verification
-        gradient_cosine_min: float = 0.8,
-        gradient_norm_ratio_min: float = 0.5,
-        gradient_norm_ratio_max: float = 2.0,
+        gradient_norm_ratio_max: float = 1.04,
+        # Weight verification
+        weight_relative_error_max: float = 0.04,
         # MFU calculation
         gpu_peak_tflops: float = 312.0,
         validator_image: str | None = None,
@@ -186,7 +185,6 @@ class AffinetesRunner:
 
         Args:
             mode: Execution mode ("docker" for local, "basilica" for remote)
-            basilica_endpoint: Basilica API endpoint (not needed with SDK)
             basilica_api_key: Basilica API key (or BASILICA_API_TOKEN env var)
             docker_gpu_devices: GPU devices for Docker ("all", "0", "0,1", "none")
             docker_memory_limit: Docker memory limit (e.g., "32g")
@@ -196,9 +194,8 @@ class AffinetesRunner:
             data_url: Default data URL (HuggingFace dataset)
             max_loss_difference: Max allowed |candidate_loss - reference_loss|
             min_params_changed_ratio: Min % params that must change
-            gradient_cosine_min: Min gradient cosine similarity
-            gradient_norm_ratio_min: Min gradient norm ratio
-            gradient_norm_ratio_max: Max gradient norm ratio
+            gradient_norm_ratio_max: Encoded as 1 + max_relative_error (e.g., 1.04 = 4%)
+            weight_relative_error_max: Max relative error for final weight check (e.g., 0.04 = 4%)
             gpu_peak_tflops: GPU peak TFLOPS for MFU calculation
             validator_image: Docker image for local evaluation
             basilica_image: Docker image for Basilica (must be in registry)
@@ -210,7 +207,6 @@ class AffinetesRunner:
             basilica_memory: Memory limit (e.g., "32Gi")
         """
         self.mode = mode
-        self.basilica_endpoint = basilica_endpoint or os.getenv("BASILICA_ENDPOINT")
         self.basilica_api_key = basilica_api_key or os.getenv("BASILICA_API_TOKEN")
         self.docker_gpu_devices = docker_gpu_devices
         self.docker_memory_limit = docker_memory_limit
@@ -222,9 +218,9 @@ class AffinetesRunner:
         self.max_loss_difference = max_loss_difference
         self.min_params_changed_ratio = min_params_changed_ratio
         # Gradient verification
-        self.gradient_cosine_min = gradient_cosine_min
-        self.gradient_norm_ratio_min = gradient_norm_ratio_min
         self.gradient_norm_ratio_max = gradient_norm_ratio_max
+        # Weight verification
+        self.weight_relative_error_max = weight_relative_error_max
         # MFU calculation
         self.gpu_peak_tflops = gpu_peak_tflops
         self.validator_image = validator_image or self.DEFAULT_DOCKER_IMAGE
@@ -272,7 +268,7 @@ class AffinetesRunner:
             task_id: Evaluation task identifier
 
         Returns:
-            EvaluationResult with TPS score
+            EvaluationResult with MFU score
         """
         model_url = model_url or self.default_model_url
         data_url = data_url or self.default_data_url
@@ -393,9 +389,9 @@ async def main():
         min_trainable_params_ratio=1.0,
         min_params_changed_ratio={self.min_params_changed_ratio},
         # Gradient verification
-        gradient_cosine_min={self.gradient_cosine_min},
-        gradient_norm_ratio_min={self.gradient_norm_ratio_min},
         gradient_norm_ratio_max={self.gradient_norm_ratio_max},
+        # Weight verification
+        weight_relative_error_max={self.weight_relative_error_max},
         # MFU calculation
         gpu_peak_tflops={self.gpu_peak_tflops},
     )
@@ -446,25 +442,16 @@ asyncio.run(main())
                 ]
             )
 
-            # =================================================================
-            # SECURITY SANDBOX - Protect against malicious miner code
-            # =================================================================
+            # Docker sandbox configuration
             docker_cmd.extend(
                 [
-                    # NETWORK ISOLATION - Prevent miner code from making any network requests
-                    # Model and data are pre-cached in the Docker image
                     "--network",
                     "none",
-                    # Drop all Linux capabilities
                     "--cap-drop",
                     "ALL",
-                    # Prevent privilege escalation
                     "--security-opt",
                     "no-new-privileges",
-                    # Read-only root filesystem
                     "--read-only",
-                    # Limit number of processes (prevent fork bombs)
-                    # PyTorch with OpenMP needs many threads, 1024 is reasonable
                     "--pids-limit",
                     "1024",
                     # Writable /tmp for temporary files (exec needed for torch.compile)
@@ -639,13 +626,13 @@ asyncio.run(main())
         """Run evaluation remotely via Basilica SDK.
 
         Uses BasilicaClient to deploy a custom Docker image and call
-        the /evaluate endpoint for TPS evaluation.
+        the /evaluate endpoint for MFU evaluation.
 
         Flow:
         1. Deploy image to Basilica (or reuse existing deployment)
         2. Wait for deployment to be ready (/health endpoint)
         3. POST to /evaluate with miner's code
-        4. Return TPS results
+        4. Return MFU results
         """
         logger.info("=" * 60)
         logger.info("[BASILICA] Starting remote GPU evaluation")
@@ -713,9 +700,9 @@ asyncio.run(main())
                 "min_trainable_params_ratio": 1.0,
                 "min_params_changed_ratio": self.min_params_changed_ratio,
                 # Gradient verification
-                "gradient_cosine_min": self.gradient_cosine_min,
-                "gradient_norm_ratio_min": self.gradient_norm_ratio_min,
                 "gradient_norm_ratio_max": self.gradient_norm_ratio_max,
+                # Weight verification
+                "weight_relative_error_max": self.weight_relative_error_max,
                 # MFU calculation
                 "gpu_peak_tflops": self.gpu_peak_tflops,
             }
@@ -908,7 +895,6 @@ def create_runner(
         Configured AffinetesRunner
     """
     if mode == "basilica":
-        kwargs.setdefault("basilica_endpoint", os.getenv("BASILICA_ENDPOINT"))
         kwargs.setdefault("basilica_api_key", os.getenv("BASILICA_API_TOKEN"))
 
     return AffinetesRunner(mode=mode, **kwargs)

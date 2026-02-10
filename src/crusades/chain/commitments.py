@@ -39,18 +39,6 @@ BLOCKED_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
 ]
 
-# Allowlisted domains for code hosting (for future use - domain allowlisting)
-# Currently not enforced, but available for stricter security if needed
-ALLOWED_DOMAINS = [
-    "gist.githubusercontent.com",
-    "raw.githubusercontent.com",
-    "gist.github.com",
-    "github.com",
-    "gitlab.com",
-    "bitbucket.org",
-    "pastebin.com",
-]
-
 
 def is_ip_blocked(ip_str: str) -> bool:
     """Check if an IP address is in a blocked private/internal range.
@@ -101,18 +89,14 @@ class CodeUrlInfo:
     def is_valid(self) -> bool:
         """Check if code URL is valid (basic format check only).
 
-        Note: Full SSRF validation is done by validate_url_security() which
-        resolves the hostname and checks for blocked IP ranges.
+        Note: Full validation is done by validate_url_security().
         """
         return bool(self.url) and (
             self.url.startswith("http://") or self.url.startswith("https://")
         )
 
     def validate_url_security(self) -> tuple[bool, str]:
-        """Validate URL for SSRF protection by resolving hostname and checking IP ranges.
-
-        This performs DNS resolution and checks that the resolved IP is not in
-        a private/internal network range that could be used for SSRF attacks.
+        """Validate URL by resolving hostname and checking IP ranges.
 
         Returns:
             Tuple of (is_safe, error_message). If is_safe is True, error_message
@@ -443,24 +427,8 @@ class CommitmentReader:
         """
         all_commitments = self.get_all_commitments()
 
-        # Filter to only those revealed after last_block
-        new_commitments = [c for c in all_commitments if c.reveal_block > last_block]
+        # Filter to commitments revealed at or after last_block.
+        new_commitments = [c for c in all_commitments if c.reveal_block >= last_block]
 
         logger.info(f"Found {len(new_commitments)} new commitments since block {last_block}")
         return new_commitments
-
-
-def get_commitment_reader(
-    network: str = "finney",
-    netuid: int = 1,
-) -> CommitmentReader:
-    """Factory function to create a commitment reader.
-
-    Args:
-        network: Subtensor network
-        netuid: Subnet ID
-
-    Returns:
-        Configured CommitmentReader
-    """
-    return CommitmentReader(netuid=netuid, network=network)

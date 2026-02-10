@@ -210,7 +210,7 @@ MOCK_RECENT = [
         "miner_uid": 23,
         "miner_hotkey": "5GNJqTPy...",
         "status": "finished",
-        "final_score": 4089,
+        "final_score": 40.89,
         "created_at": "2026-01-07T08:45:00Z",
     },
     {

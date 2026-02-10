@@ -4,7 +4,7 @@ import logging
 
 from crusades import COMPETITION_VERSION
 
-from ..config import get_config, get_hparams
+from ..config import get_hparams
 from ..storage.database import Database
 from .manager import ChainManager
 
@@ -15,8 +15,8 @@ class WeightSetter:
     """Handles setting weights on the Bittensor network.
 
     Implements burn_rate distribution:
-    - burn_rate portion (e.g., 95%) goes to burn_uid (validator)
-    - (1 - burn_rate) portion (e.g., 5%) goes to top MFU winner (leaderboard rank 1)
+    - burn_rate portion goes to burn_uid (configurable burn destination)
+    - (1 - burn_rate) portion goes to top MFU winner (leaderboard rank 1)
 
     If no valid winner exists, all emissions go to burn_uid.
 
@@ -32,11 +32,10 @@ class WeightSetter:
     ):
         self.chain = chain
         self.db = database
-        self.config = get_config()
         self.hparams = get_hparams()
 
         # Burn configuration from hparams
-        self.burn_rate = self.hparams.burn_rate  # e.g., 0.95 = 95% to validator
+        self.burn_rate = self.hparams.burn_rate  # Fraction of emissions to burn_uid
         self.burn_uid = self.hparams.burn_uid  # UID that receives burn portion
 
         # Track previous winner to detect changes (loaded from DB each cycle)
@@ -66,8 +65,8 @@ class WeightSetter:
         """Set weights based on leaderboard rank 1 with burn_rate distribution.
 
         Distribution:
-        - burn_rate (e.g., 95%) goes to burn_uid (validator)
-        - (1 - burn_rate) (e.g., 5%) goes to leaderboard rank 1
+        - burn_rate portion goes to burn_uid (burn destination)
+        - (1 - burn_rate) portion goes to leaderboard rank 1
 
         The leaderboard applies an adaptive threshold that decays over time.
         Big improvements create high thresholds, rewarding significant jumps.
@@ -183,7 +182,7 @@ class WeightSetter:
 
         logger.info(
             f"Setting weights with burn_rate={self.burn_rate:.0%}:\n"
-            f"  - UID {self.burn_uid} (validator): {burn_weight:.2f}\n"
+            f"  - UID {self.burn_uid} (burn): {burn_weight:.2f}\n"
             f"  - UID {winner_uid} (winner, MFU={winner_score:.2f}%): {winner_weight:.2f}"
         )
 
