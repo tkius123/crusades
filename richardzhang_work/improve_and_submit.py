@@ -22,9 +22,18 @@ Usage:
   uv run python richardzhang_work/improve_and_submit.py --submit       # + auto-submit
   uv run python richardzhang_work/improve_and_submit.py --service      # run periodically
 
+Config (richardzhang_work/improve_config.json):
+  no_comment          — true (default) = output must have no comments; false = comments allowed
+  improvement_policy — "copycat" | "minor" (default) | "major"
+    copycat: exactly copy top submission, only change variable names
+    minor:   1 or 2 modifications from the top submission
+    major:   one significant change that the AI recommends
+
 Env overrides:
   IMPROVE_INTERVAL   — seconds between runs in --service (default: 3600)
   IMPROVE_LOG_FILE   — log file path
+  IMPROVE_NO_COMMENT — true | false (overrides no_comment from config)
+  IMPROVE_POLICY     — copycat | minor | major (overrides improvement_policy)
 """
 
 import argparse
@@ -73,26 +82,84 @@ ALLOWED optimizations (legitimate speed-ups):
 - Freeing stale optimizer states via gc
 - Any other optimization that doesn't change the math or bypass the optimizer
 
-{top_mfu_section}
-STRATEGY — minimal, conservative edits:
-- Start by copying the ENTIRE #1 submission code below. Do not rewrite it.
-- Then make only ONE or very few small changes at a time so we can see how each change affects MFU.
-- Do not rewrite the training loop; only adjust settings or add one optimization at a time.
-- Your improved code must match or exceed the #1 submission's MFU while passing all verification rules.
+{strategy_section}
 
 {notes_section}
 The section below (if present) shows your previous improvement's evaluation result and MFU; use it to avoid regressions or repeating failures.
 {previous_result_section}
-=== Current #1 submission (copy this in full, then apply minimal edits) ===
+=== Current #1 submission ===
 {top_code}
 
 Write the complete improved code to richardzhang_work/improved/train_agent_output.py.
-The code must have no comments. Only pure Python.
+{code_style_section}
 """
 
 
 def script_dir() -> Path:
     return Path(__file__).resolve().parent
+
+
+IMPROVE_CONFIG_DEFAULTS: dict[str, Any] = {
+    "no_comment": True,
+    "improvement_policy": "minor",
+}
+
+VALID_POLICIES = ("copycat", "minor", "major")
+
+
+def load_improve_config(work_dir: Path) -> dict[str, Any]:
+    """Load improve_config.json from work_dir; env overrides: IMPROVE_NO_COMMENT, IMPROVE_POLICY."""
+    config = dict(IMPROVE_CONFIG_DEFAULTS)
+    config_path = work_dir / "improve_config.json"
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text())
+            if isinstance(data.get("no_comment"), bool):
+                config["no_comment"] = data["no_comment"]
+            if data.get("improvement_policy") in VALID_POLICIES:
+                config["improvement_policy"] = data["improvement_policy"]
+        except (json.JSONDecodeError, OSError):
+            pass
+    env_no_comment = os.environ.get("IMPROVE_NO_COMMENT", "").strip().lower()
+    if env_no_comment in ("1", "true", "yes"):
+        config["no_comment"] = True
+    elif env_no_comment in ("0", "false", "no"):
+        config["no_comment"] = False
+    env_policy = os.environ.get("IMPROVE_POLICY", "").strip().lower()
+    if env_policy in VALID_POLICIES:
+        config["improvement_policy"] = env_policy
+    return config
+
+
+def build_strategy_section(config: dict[str, Any], top_mfu_section: str) -> str:
+    """Build the strategy block for the prompt based on improvement_policy."""
+    policy = config.get("improvement_policy") or "minor"
+    if policy == "copycat":
+        return f"""{top_mfu_section}
+STRATEGY — COPYCAT:
+- Exactly copy the #1 submission code below. Only change some variable names (e.g. rename locals or globals for clarity).
+- Do NOT change any logic, control flow, or behavior. Output must be functionally identical to the top submission."""
+    if policy == "minor":
+        return f"""{top_mfu_section}
+STRATEGY — MINOR (1 or 2 modifications only):
+- Start by copying the ENTIRE #1 submission code below. Do not rewrite it.
+- Then make only ONE or TWO small changes so we can see how each change affects MFU.
+- Do not rewrite the training loop; only adjust settings or add one optimization at a time.
+- Your improved code must match or exceed the #1 submission's MFU while passing all verification rules."""
+    if policy == "major":
+        return f"""{top_mfu_section}
+STRATEGY — MAJOR (significant change):
+- Use the #1 submission as the base. You may introduce one significant change that you recommend (e.g. different compile mode, optimization, or structure).
+- All RULES must still be satisfied. The code must be expected to match or exceed the #1 submission's MFU.
+- Prefer a single, well-motivated change over many small tweaks."""
+    return f"{top_mfu_section}\nSTRATEGY: Use the #1 submission as the base and improve within the rules above."
+
+
+def build_code_style_section(config: dict[str, Any]) -> str:
+    """Build the code style line (no comments vs comments allowed)."""
+    if config.get("no_comment", True):
+        return "The code must have no comments. Only pure Python."
+    return "Comments are allowed if they help explain non-obvious choices."
 
 
 def load_dotenv(env_path: Path) -> None:
@@ -583,9 +650,18 @@ def run_improve(
     else:
         top_mfu_section = "Current #1 submission (MFU not available in this run). Your improved code must pass all verification rules."
 
+    # Improvement policy and code style from config
+    work_dir = script_dir()
+    improve_config = load_improve_config(work_dir)
+    strategy_section = build_strategy_section(improve_config, top_mfu_section)
+    code_style_section = build_code_style_section(improve_config)
+    log(f"Config: no_comment={improve_config.get('no_comment')}, policy={improve_config.get('improvement_policy')}", log_path)
+
     # Build prompt inputs
     notes_section = load_notes(notes_path) if notes_path else ""
     previous_result_section = get_previous_result_section(output_dir)
+    if improve_config.get("improvement_policy") == "copycat":
+        previous_result_section = ""
 
     # Find the most recent evaluated submission id for dedup
     eval_sid = _get_latest_eval_sid(output_dir)
@@ -598,10 +674,11 @@ def run_improve(
         return 0
     
     prompt = IMPROVE_PROMPT.format(
-        top_mfu_section=top_mfu_section,
+        strategy_section=strategy_section,
         notes_section=notes_section,
         previous_result_section=previous_result_section,
         top_code=top_code,
+        code_style_section=code_style_section,
     )
 
     log(f"Launching Cursor agent to generate improved train.py (model={model or 'auto'})...", log_path)
