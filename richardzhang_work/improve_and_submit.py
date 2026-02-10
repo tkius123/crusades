@@ -53,7 +53,7 @@ import httpx
 
 CURSOR_API_BASE = "https://api.cursor.com/v0"
 DEFAULT_MODEL = "claude-4.6-opus-high-thinking"
-COPYCAT_MODEL = "claude-3-5-haiku"  # cheap model for copycat (rename-only); minor/major use default
+COPYCAT_MODEL = "auto"  # copycat: let Cursor pick (cheap); minor/major use default
 DEFAULT_INTERVAL_SEC = 3600  # 1 hour
 WALLET_COOLDOWN_SEC = 4320  # 1.2 hours = 72 minutes
 AGENT_POLL_INTERVAL = 5

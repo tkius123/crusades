@@ -244,5 +244,14 @@
     "status": "finished",
     "mfu": 45.10719443983527,
     "last_checked": "2026-02-10T10:07:09.673886"
+  },
+  {
+    "wallet_name": "mycoldkey2",
+    "wallet_hotkey": "myhotkey2",
+    "uid": 241,
+    "gist_url": "https://gist.githubusercontent.com/tkius123/f6a3f4ceb6a78b56e90823dd530323bd/raw/53ec0df6ab38e5c26cef2d49616ab1aa29aeacab/train.py",
+    "code_file": "train_20260210_103756.py",
+    "submit_status": "submitted",
+    "submitted_at": "2026-02-10T10:38:40.911939"
   }
 ]
