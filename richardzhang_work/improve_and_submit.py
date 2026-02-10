@@ -88,8 +88,6 @@ ALLOWED optimizations (legitimate speed-ups):
 
 {applied_changes_section}
 {notes_section}
-The section below (if present) shows your previous improvement's evaluation result and MFU; use it to avoid regressions or repeating failures.
-{previous_result_section}
 === Current #1 submission ===
 {top_code}
 
