@@ -40,49 +40,14 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             torch.backends.cuda.enable_math_sdp(False)
 
             try:
-                torch.autograd.set_detect_anomaly(False)
+                import torch._inductor.config as inductor_config
+                inductor_config.coordinate_descent_tuning = True
+                inductor_config.fx_graph_cache = True
             except Exception:
                 pass
 
             try:
-                torch._C._jit_set_profiling_mode(False)
-                torch._C._jit_set_profiling_executor(False)
-            except Exception:
-                pass
-
-            try:
-                torch._dynamo.config.cache_size_limit = 256
-                torch._dynamo.config.automatic_dynamic_shapes = False
-                torch._dynamo.config.assume_static_by_default = True
-                torch._dynamo.config.suppress_errors = True
-            except Exception:
-                pass
-
-            try:
-                torch._dynamo.config.optimize_ddp = False
-            except Exception:
-                pass
-
-            try:
-                import torch._inductor.config as _ic
-                _ic.coordinate_descent_tuning = True
-                _ic.triton.unique_kernel_names = True
-                _ic.fx_graph_cache = True
-                _ic.epilogue_fusion = True
-                for _a, _v in [
-                    ("triton.cudagraph_trees", True),
-                    ("triton.cudagraphs", True),
-                    ("split_reductions", True),
-                    ("aggressive_fusion", True),
-                ]:
-                    try:
-                        _parts = _a.split(".")
-                        _obj = _ic
-                        for _p in _parts[:-1]:
-                            _obj = getattr(_obj, _p)
-                        setattr(_obj, _parts[-1], _v)
-                    except Exception:
-                        pass
+                torch._dynamo.config.cache_size_limit = 64
             except Exception:
                 pass
 
@@ -116,7 +81,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             with torch.autocast(device_type=dev_type, dtype=torch.bfloat16):
                 logits = model(input_ids).logits
                 loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
+                    logits.reshape(-1, logits.size(-1)),
                     labels.reshape(-1),
                     ignore_index=-100,
                 )
@@ -137,7 +102,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
                         _eager_step,
                         mode="reduce-overhead",
                         fullgraph=False,
-                        dynamic=False,
                     )
                 except Exception:
                     _train_fn = _eager_step
@@ -150,25 +114,24 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
     try:
         pf = _pf_stream
-        use_pf = is_cuda and pf is not None
-
-        if use_pf:
+        if is_cuda and pf is not None:
             with torch.cuda.stream(pf):
                 next_batch = next(data_iterator).to(device, non_blocking=True)
         else:
             next_batch = next(data_iterator).to(device)
 
         total_tokens = 0
-        last_step = num_steps - 1
+        final_loss = 0.0
+        final_logits = None
 
         for step in range(num_steps):
-            if use_pf:
+            if is_cuda and pf is not None:
                 torch.cuda.current_stream().wait_stream(pf)
             batch = next_batch
 
-            if step < last_step:
+            if step < num_steps - 1:
                 nb = next(data_iterator)
-                if use_pf:
+                if is_cuda and pf is not None:
                     with torch.cuda.stream(pf):
                         next_batch = nb.to(device, non_blocking=True)
                 else:
@@ -181,8 +144,11 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
             total_tokens += batch.numel()
 
-        final_logits = logits.float()
-        final_loss = loss.item()
+            if step == num_steps - 1:
+                final_logits = logits.float()
+                final_loss = loss.item()
+            else:
+                del loss, logits
 
     finally:
         if gc_was_enabled:

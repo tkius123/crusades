@@ -52,37 +52,18 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
             try:
                 torch._dynamo.config.cache_size_limit = 256
+            except Exception:
+                pass
+            try:
                 torch._dynamo.config.automatic_dynamic_shapes = False
+            except Exception:
+                pass
+            try:
                 torch._dynamo.config.assume_static_by_default = True
+            except Exception:
+                pass
+            try:
                 torch._dynamo.config.suppress_errors = True
-            except Exception:
-                pass
-
-            try:
-                torch._dynamo.config.optimize_ddp = False
-            except Exception:
-                pass
-
-            try:
-                import torch._inductor.config as _ic
-                _ic.coordinate_descent_tuning = True
-                _ic.triton.unique_kernel_names = True
-                _ic.fx_graph_cache = True
-                _ic.epilogue_fusion = True
-                for _a, _v in [
-                    ("triton.cudagraph_trees", True),
-                    ("triton.cudagraphs", True),
-                    ("split_reductions", True),
-                    ("aggressive_fusion", True),
-                ]:
-                    try:
-                        _parts = _a.split(".")
-                        _obj = _ic
-                        for _p in _parts[:-1]:
-                            _obj = getattr(_obj, _p)
-                        setattr(_obj, _parts[-1], _v)
-                    except Exception:
-                        pass
             except Exception:
                 pass
 
@@ -127,20 +108,12 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             try:
                 _train_fn = torch.compile(
                     _eager_step,
-                    mode="max-autotune",
+                    mode="reduce-overhead",
                     fullgraph=False,
                     dynamic=False,
                 )
             except Exception:
-                try:
-                    _train_fn = torch.compile(
-                        _eager_step,
-                        mode="reduce-overhead",
-                        fullgraph=False,
-                        dynamic=False,
-                    )
-                except Exception:
-                    _train_fn = _eager_step
+                _train_fn = _eager_step
         else:
             _train_fn = _eager_step
 
