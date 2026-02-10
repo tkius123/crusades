@@ -120,7 +120,7 @@ uv run python richardzhang_work/fetch_top_submissions.py --service --interval 30
 
 **Smart skipping:** If the submission ID for a given rank hasn't changed since last fetch, it skips re-downloading details and code.
 
-**Recent submission matching:** When `--recent` is used, the script fetches your UIDs' recent submissions, matches them to `improved/submissions.json` entries by `gist_url` (extracted from the submission's `code_hash`), and updates each entry's `submission_id`, `status`, `mfu`, and `last_checked`.
+**Recent submission matching:** When `--recent` is used, the script fetches your UIDs' recent submissions, matches them to `improved/submissions.json` entries by `gist_url` (extracted from the submission's `code_hash`), and updates each entry's `submission_id`, `status`, and `mfu`. Entries with status already `finished` are not updated. `last_checked` is only updated when `status` changes.
 
 **Output:**
 

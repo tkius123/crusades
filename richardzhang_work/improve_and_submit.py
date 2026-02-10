@@ -831,11 +831,8 @@ def run_improve(
     if config_policy == "circular" and cycle_idx is not None:
         log(f"Circular cycle index this run: {cycle_idx} -> policy={policy}", log_path)
 
-    # Build prompt inputs
+    # Build prompt inputs (do not reference our own improvement submissions)
     notes_section = load_notes(notes_path) if notes_path else ""
-    previous_result_section = get_previous_result_section(output_dir)
-    if policy == "copycat":
-        previous_result_section = ""
 
     if policy in ("minor", "major"):
         applied_changes_section = load_applied_changes_section(output_dir, top_sid)
@@ -848,7 +845,6 @@ def run_improve(
         strategy_section=strategy_section,
         applied_changes_section=applied_changes_section,
         notes_section=notes_section,
-        previous_result_section=previous_result_section,
         top_code=top_code,
         code_style_section=code_style_section,
     )

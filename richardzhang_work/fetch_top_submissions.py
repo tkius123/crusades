@@ -170,7 +170,14 @@ def update_my_submissions(
                 matched_idx = i
                 break
 
-        # If not matched, fetch full detail to get code_hash (= gist URL) and match
+        # If we already have this submission and it's finished, skip (don't fetch again)
+        if matched_idx is not None:
+            existing = submissions[matched_idx]
+            if existing.get("status", "") == "finished":
+                log(f"  My submission (UID {uid}): {sid} already finished — skip", log_path)
+                continue
+
+        # If not matched by id, fetch full detail to get code_hash (= gist URL) and match
         if matched_idx is None:
             detail = fetch_submission(client, api_url, sid)
             code_hash = detail.get("code_hash", "") or ""
@@ -180,10 +187,17 @@ def update_my_submissions(
                     break
 
         if matched_idx is not None:
+            existing = submissions[matched_idx]
+            existing_status = existing.get("status", "")
+            if existing_status == "finished":
+                log(f"  My submission (UID {uid}): {sid} already finished — skip", log_path)
+                continue
+            status_changed = existing_status != status
             submissions[matched_idx]["submission_id"] = sid
             submissions[matched_idx]["status"] = status
             submissions[matched_idx]["mfu"] = mfu
-            submissions[matched_idx]["last_checked"] = datetime.now().isoformat()
+            if status_changed:
+                submissions[matched_idx]["last_checked"] = datetime.now().isoformat()
             updated += 1
             log(f"  My submission (UID {uid}): {sid} status={status} MFU={mfu}", log_path)
         else:
