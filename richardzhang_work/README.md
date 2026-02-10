@@ -227,7 +227,7 @@ For **minor** and **major**, the script records what changed vs the top submissi
 
 **Previous result feedback:** The prompt includes the most recent *evaluated* submission from `improved/submissions.json` (walks backwards to find one with status `finished` or `failed_*`). If the previous submission failed, the prompt instructs the agent to fix issues and be more conservative. If it succeeded, the prompt asks to beat its MFU.
 
-**Deduplication:** Saves `{top_sid, eval_sid}` to `improved/last_gen_inputs.json`. If both the #1 honest submission and the latest evaluated submission are unchanged, the agent call is skipped.
+**Last run record:** Saves `{top_sid, policy}` to `improved/last_gen_inputs.json` after each generation (reference only; not used for skip logic).
 
 **Code retrieval:** The prompt tells the agent to write code to `richardzhang_work/improved/train_agent_output.py` on its branch. The script fetches this file from the agent's branch via GitHub API. Falls back to extracting code from the conversation reply.
 
@@ -244,7 +244,7 @@ improved/
   submissions.json             # all submission attempts (success + failure)
   wallet_history.json          # last submission time per wallet
   gist.json                    # shared gist ID
-  last_gen_inputs.json         # dedup: {top_sid, eval_sid}
+  last_gen_inputs.json         # last run: {top_sid, policy} (policy = copycat|minor|major)
   last_applied_changes.json    # (minor/major) last diff vs top submission, used in next prompt
 ```
 
@@ -257,6 +257,7 @@ improved/
   "uid": 42,
   "gist_url": "https://gist.githubusercontent.com/.../train.py",
   "code_file": "train_20260209_232843.py",
+  "policy": "minor",
   "submit_status": "submitted",
   "submitted_at": "2026-02-09T23:29:29.276964",
   "submission_id": "v3_commit_7509610_241",

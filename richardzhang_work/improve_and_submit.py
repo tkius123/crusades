@@ -649,6 +649,7 @@ def record_submission(
     code_file: str = "",
     submit_status: str = "submitted",
     error: str = "",
+    policy: str = "",
 ) -> None:
     """Record a submission attempt (success or failure) in cooldown history + submissions log."""
     now = datetime.now().isoformat()
@@ -673,6 +674,8 @@ def record_submission(
         "submit_status": submit_status,
         "submitted_at": now,
     }
+    if policy:
+        entry["policy"] = policy
     if error:
         entry["error"] = error
     submissions.append(entry)
@@ -839,16 +842,8 @@ def run_improve(
     else:
         applied_changes_section = ""
 
-    # Find the most recent evaluated submission id for dedup
-    eval_sid = _get_latest_eval_sid(output_dir)
+    current_inputs = {"top_sid": top_sid, "policy": policy}
 
-    # Skip if inputs are identical to last generation attempt
-    last_gen = _load_last_gen_inputs(output_dir)
-    current_inputs = {"top_sid": top_sid, "eval_sid": eval_sid}
-    if last_gen == current_inputs:
-        log(f"Same inputs as last generation (top={top_sid}, eval={eval_sid}). Skipping.", log_path)
-        return 0
-    
     prompt = IMPROVE_PROMPT.format(
         strategy_section=strategy_section,
         applied_changes_section=applied_changes_section,
@@ -942,7 +937,7 @@ def run_improve(
             log(result.stdout, log_path)
         else:
             err_msg = result.stderr.strip()[:500]
-            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="failed", error=err_msg)
+            record_submission(output_dir, wallet, gist_url=raw_url, code_file=code_path.name, submit_status="failed", error=err_msg, policy=policy)
             log(f"Submission failed (exit {result.returncode}): {err_msg}", log_path)
             return 1
 
