@@ -72,7 +72,7 @@ class ChainManager:
         Returns:
             The synced metagraph, or None if sync fails.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             # Use subtensor.metagraph() for proper localnet compatibility
             self._metagraph = await loop.run_in_executor(
@@ -132,7 +132,7 @@ class ChainManager:
 
     async def get_current_block(self) -> int:
         """Get the current block number."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             lambda: self.subtensor.block,
@@ -152,7 +152,7 @@ class ChainManager:
         Returns:
             Tuple of (success, message)
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         try:
             # Convert to tensors

@@ -80,6 +80,9 @@ class Validator(BaseNode):
         self.last_weight_set_block: int = 0
         self.last_sync_time: float = 0
 
+        # Memory cleanup tracking
+        self._loop_count: int = 0
+
     async def initialize(self) -> None:
         """Initialize validator components."""
         global logger
@@ -132,7 +135,6 @@ class Validator(BaseNode):
         # Affinetes runner - all config comes from validated Pydantic models
         self.affinetes_runner = AffinetesRunner(
             mode=self.affinetes_mode,
-            basilica_endpoint=os.getenv("BASILICA_ENDPOINT"),
             basilica_api_key=os.getenv("BASILICA_API_TOKEN"),
             # Docker config
             docker_gpu_devices=hparams.docker.gpu_devices,
@@ -145,9 +147,9 @@ class Validator(BaseNode):
             max_loss_difference=hparams.verification.max_loss_difference,
             min_params_changed_ratio=hparams.verification.min_params_changed_ratio,
             # Gradient verification
-            gradient_cosine_min=hparams.verification.gradient_cosine_min,
-            gradient_norm_ratio_min=hparams.verification.gradient_norm_ratio_min,
             gradient_norm_ratio_max=hparams.verification.gradient_norm_ratio_max,
+            # Weight verification
+            weight_relative_error_max=hparams.verification.weight_relative_error_max,
             # MFU calculation
             gpu_peak_tflops=hparams.mfu.gpu_peak_tflops,
             # Basilica config
@@ -210,7 +212,7 @@ class Validator(BaseNode):
         await asyncio.sleep(10)
 
     async def process_blockchain_commitments(self) -> None:
-        """Read and process new gist commitments from blockchain."""
+        """Read and process new URL commitments from blockchain."""
         try:
             new_commitments = self.commitment_reader.get_new_commitments_since(
                 self.last_processed_block
@@ -386,7 +388,7 @@ class Validator(BaseNode):
             max_size = 500_000
             req = urllib.request.Request(code_url, headers={"User-Agent": "templar-crusades"})
             with opener.open(req, timeout=30) as response:
-                # Read in chunks to prevent OOM from malicious large responses
+                # Read in chunks with size limit
                 chunks = []
                 total_bytes = 0
                 while True:
@@ -436,7 +438,12 @@ class Validator(BaseNode):
             f"Found {len(evaluating)} submissions in EVALUATING status (v{competition_version})"
         )
 
-        for submission in evaluating:
+        for sub_idx, submission in enumerate(evaluating):
+            # Check if we should set weights between submissions
+            # This ensures weight setting isn't blocked by long evaluation runs
+            if sub_idx > 0:
+                await self.maybe_set_weights()
+
             code_url = submission.bucket_path
 
             if not code_url or not code_url.startswith("http"):
@@ -566,7 +573,7 @@ class Validator(BaseNode):
 
             # Check minimum success rate
             success_rate = len(successful_evals) / len(all_evals) if all_evals else 0
-            min_success_rate = getattr(hparams, "min_success_rate", 0.5)
+            min_success_rate = hparams.min_success_rate
 
             if success_rate < min_success_rate:
                 await self.db.update_submission_status(
@@ -709,14 +716,8 @@ class Validator(BaseNode):
             logger.info(f"First leader established (immediate): {score:.2f}% MFU")
 
     def _cleanup_memory(self):
-        """Clean up GPU memory."""
-        if not hasattr(self, "_loop_count"):
-            self._loop_count = 0
-
+        """Clean up GPU and system memory."""
         self._loop_count += 1
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         if self._loop_count % 10 == 0:
             logger.info(f"Memory cleanup (iteration {self._loop_count})")
@@ -724,6 +725,8 @@ class Validator(BaseNode):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             gc.collect()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     async def maybe_sync(self) -> None:
         """Sync metagraph periodically."""
@@ -840,9 +843,7 @@ class Validator(BaseNode):
 
     async def _load_state(self) -> None:
         """Load persisted validator state from database."""
-        from crusades import COMPETITION_VERSION
-
-        current_version = COMPETITION_VERSION
+        current_version = crusades.COMPETITION_VERSION
 
         try:
             # Check if version changed - if so, reset state for fresh competition
@@ -901,10 +902,10 @@ class Validator(BaseNode):
 
     async def _save_state(self) -> None:
         """Persist validator state to database."""
-        from crusades import COMPETITION_VERSION
-
         try:
-            await self.db.set_validator_state("competition_version", str(COMPETITION_VERSION))
+            await self.db.set_validator_state(
+                "competition_version", str(crusades.COMPETITION_VERSION)
+            )
             await self.db.set_validator_state(
                 "last_processed_block", str(self.last_processed_block)
             )

@@ -229,7 +229,9 @@ class Database:
             return result.scalar_one_or_none()
 
     async def get_leaderboard_winner(
-        self, threshold: float = 0.01, spec_version: int | None = None
+        self,
+        threshold: float = 0.01,
+        spec_version: int | None = None,
     ) -> SubmissionModel | None:
         """Get the rank 1 submission from leaderboard with threshold.
 
@@ -293,7 +295,10 @@ class Database:
             threshold: Adaptive threshold for determining #1
         """
         # Get threshold winner (position #1)
-        winner = await self.get_leaderboard_winner(threshold=threshold, spec_version=spec_version)
+        winner = await self.get_leaderboard_winner(
+            threshold=threshold,
+            spec_version=spec_version,
+        )
 
         async with self.session_factory() as session:
             # Get all finished submissions sorted by raw score

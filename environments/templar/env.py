@@ -47,6 +47,10 @@ logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.WARNING)
 logging.getLogger("datasets").setLevel(logging.WARNING)
 
+# Saved references for use in evaluation timing
+_perf_counter = time.perf_counter
+_cuda_synchronize = torch.cuda.synchronize if torch.cuda.is_available() else lambda: None
+
 # Configuration from environment variables
 DETERMINISTIC_MODE = os.getenv("DETERMINISTIC_MODE", "1") == "1"
 EVAL_SEQUENCE_LENGTH = int(os.getenv("EVAL_SEQUENCE_LENGTH", "1024"))
@@ -77,11 +81,21 @@ class GradientInfo:
     total_layers: int = 0  # Total trainable layers
 
 
+def _log_vram(tag: str):
+    """Log current VRAM usage for debugging memory leaks."""
+    if not torch.cuda.is_available():
+        return
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    logger.info(f"[VRAM {tag}] allocated={allocated:.2f}GB reserved={reserved:.2f}GB")
+
+
 # Global cache for model (data is NOT cached for validators)
 _CACHE = {
     "model": None,
     "model_path": None,
     "initial_state": None,
+    "use_random_init": None,
 }
 
 
@@ -93,10 +107,6 @@ def _load_miner_module(train_path: Path):
 
     Returns:
         Loaded module with inner_steps function
-
-    Security:
-        - Docker provides isolation (--network=none, restricted filesystem)
-        - No import sandboxing (incompatible with ML libraries)
     """
     spec = importlib.util.spec_from_file_location("miner_train", train_path)
     if spec is None or spec.loader is None:
@@ -109,29 +119,89 @@ def _load_miner_module(train_path: Path):
 
 
 def _reset_torch_state():
-    """Reset torch global state after miner code execution.
-
-    This prevents miners from leaving malicious state that affects
-    subsequent evaluations or verification.
-    """
-    # Reset CUDA state
+    """Reset torch global state between evaluations."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-    # Reset deterministic settings
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    # Ensure gradients are enabled
+    _enforce_backend_state()
     torch.set_grad_enabled(True)
-
-    # Reset default dtype (miners might change this)
     torch.set_default_dtype(torch.float32)
 
+    # Clear torch.compile caches (miner code may have used torch.compile,
+    # which holds references to model tensors and compiled graphs)
+    try:
+        torch._dynamo.reset()
+    except Exception:
+        pass
+
+    # Remove miner module from sys.modules to release all references
+    # (closures, compiled functions, global state in the miner's code)
+    if "miner_train" in sys.modules:
+        del sys.modules["miner_train"]
+
+    # Restore saved references
+    time.perf_counter = _perf_counter
+    if torch.cuda.is_available():
+        torch.cuda.synchronize = _cuda_synchronize
+
     logger.debug("Torch state reset complete")
+
+
+# Canonical backend settings used during reference and timed evaluation.
+# Both runs MUST use identical settings so gradients/weights can be compared.
+# Changing e.g. cudnn.benchmark or deterministic causes non-deterministic
+# algorithm selection, making the reference vs miner comparison unreliable.
+_REFERENCE_BACKEND_STATE = {
+    "cudnn.deterministic": True,
+    "cudnn.benchmark": False,
+    "cudnn.allow_tf32": True,
+    "float32_matmul_precision": "highest",
+    "flash_sdp_enabled": True,
+    "mem_efficient_sdp_enabled": True,
+    "math_sdp_enabled": True,
+}
+# NOTE: cuda.matmul.allow_tf32 is intentionally omitted.
+# torch.set_float32_matmul_precision("highest") overrides it to False,
+# so setting it to True and then checking it would always fail.
+# The matmul precision setting is the authoritative control for TF32 in matmuls.
+
+
+def _enforce_backend_state():
+    """Set all torch backend settings to the canonical reference values."""
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.allow_tf32 = True
+    # set_float32_matmul_precision("highest") is the authoritative control
+    # for matmul TF32 precision. It internally sets cuda.matmul.allow_tf32,
+    # so we do NOT set allow_tf32 separately (they would conflict).
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+
+
+def _check_backend_state() -> list[str]:
+    """Check all torch backend settings against canonical reference values.
+
+    Returns a list of setting names that were tampered with (empty if all OK).
+    """
+    violations = []
+    if not torch.backends.cudnn.deterministic:
+        violations.append("cudnn.deterministic")
+    if torch.backends.cudnn.benchmark:
+        violations.append("cudnn.benchmark")
+    if not torch.backends.cudnn.allow_tf32:
+        violations.append("cudnn.allow_tf32")
+    if torch.get_float32_matmul_precision() != "highest":
+        violations.append("float32_matmul_precision")
+    if not torch.backends.cuda.flash_sdp_enabled():
+        violations.append("flash_sdp_enabled")
+    if not torch.backends.cuda.mem_efficient_sdp_enabled():
+        violations.append("mem_efficient_sdp_enabled")
+    if not torch.backends.cuda.math_sdp_enabled():
+        violations.append("math_sdp_enabled")
+    return violations
 
 
 def _load_hf_dataset(
@@ -144,11 +214,8 @@ def _load_hf_dataset(
 ) -> torch.Tensor:
     """Load and tokenize dataset from HuggingFace or local cache.
 
-    SECURITY: Validators use unpredictable seeds so miners can't pre-compute
-    which samples will be used for evaluation.
-
     When running with --network none, uses pre-cached dataset from Docker image.
-    The validator seed is used to shuffle the cached data unpredictably.
+    The validator seed is used to shuffle the cached data.
 
     Args:
         dataset_name: HuggingFace dataset name
@@ -176,39 +243,60 @@ def _load_hf_dataset(
 
     logger.info(f"Loading dataset: {dataset_name} (samples={num_samples})")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Cache tokenizer to avoid reloading every eval (HF tokenizers leak via Rust FFI)
+    if _CACHE.get("tokenizer") is not None and _CACHE.get("tokenizer_model") == model_name:
+        tokenizer = _CACHE["tokenizer"]
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        _CACHE["tokenizer"] = tokenizer
+        _CACHE["tokenizer_model"] = model_name
 
     # Check for cached dataset (enables --network none operation)
     cached_path = os.getenv("CACHED_DATASET_PATH", "/home/appuser/.cache/templar/dataset.json")
 
     if Path(cached_path).exists():
-        # Load from cache and shuffle with validator seed
-        logger.info(f"Using cached dataset: {cached_path}")
-        with open(cached_path) as f:
-            all_samples = json.load(f)
+        # Tokenize ALL samples once and cache the full tensor.
+        # Subsequent evals just shuffle indices (fast) instead of
+        # re-tokenizing 10k samples (slow + leaks memory).
+        cache_key = f"tokenized_{cached_path}_{sequence_length}"
+        all_tokenized = _CACHE.get(cache_key)
 
-        # Shuffle with validator seed for unpredictability
+        if all_tokenized is None:
+            logger.info(f"First load — tokenizing cached dataset: {cached_path}")
+            with open(cached_path) as f:
+                all_samples = json.load(f)
+
+            tokens_list = []
+            for text in all_samples:
+                encoded = tokenizer(
+                    text,
+                    max_length=sequence_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                tokens_list.append(encoded["input_ids"].squeeze(0))
+
+            if not tokens_list:
+                raise ValueError("No samples in cached dataset")
+
+            all_tokenized = torch.stack(tokens_list)
+            _CACHE[cache_key] = all_tokenized
+            logger.info(f"Tokenized and cached: {all_tokenized.shape}")
+        else:
+            logger.info(f"Using pre-tokenized cache: {all_tokenized.shape}")
+
+        # Shuffle indices with validator seed for unpredictability
+        total = all_tokenized.size(0)
+        indices = list(range(total))
         rng = random.Random(actual_seed)
-        rng.shuffle(all_samples)
+        rng.shuffle(indices)
+        selected = indices[:num_samples]
 
-        tokens_list = []
-        for text in all_samples[:num_samples]:
-            encoded = tokenizer(
-                text,
-                max_length=sequence_length,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt",
-            )
-            tokens_list.append(encoded["input_ids"].squeeze(0))
-
-        if not tokens_list:
-            raise ValueError("No samples in cached dataset")
-
-        data = torch.stack(tokens_list)
-        logger.info(f"Loaded cached data: shape={data.shape}, seed={actual_seed}")
+        data = all_tokenized[selected]
+        logger.info(f"Sampled data: shape={data.shape}, seed={actual_seed}")
         return data
 
     # Fallback: Load from HuggingFace (requires network)
@@ -257,12 +345,171 @@ def _set_deterministic(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def _scan_for_dangerous_patterns(tree: ast.AST) -> tuple[bool, str | None]:
+    """AST scan to reject forbidden code patterns."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in ("__setattr__", "__delattr__"):
+            if isinstance(node.value, ast.Name) and node.value.id == "object":
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "__class__":
+                    line = getattr(node, "lineno", "?")
+                    return False, f"Line {line}: forbidden pattern detected"
+
+        if isinstance(node, ast.Attribute) and node.attr == "__class__":
+            if not isinstance(getattr(node, "_parent", None), ast.AnnAssign):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        if isinstance(node, ast.Attribute) and node.attr == "perf_counter":
+            if isinstance(node.value, ast.Name) and node.value.id == "time":
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "synchronize":
+                    line = getattr(node, "lineno", "?")
+                    return False, f"Line {line}: forbidden pattern detected"
+
+        if isinstance(node, ast.Attribute) and node.attr == "__slots__":
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        # Block: gc introspection (gc.get_objects, gc.get_referrers, gc.get_referents)
+        if isinstance(node, ast.Attribute) and node.attr in (
+            "get_objects",
+            "get_referrers",
+            "get_referents",
+        ):
+            if isinstance(node.value, ast.Name) and node.value.id == "gc":
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        # Block: torch backend setting modifications (deterministic, benchmark)
+        if isinstance(node, ast.Attribute) and node.attr in (
+            "deterministic",
+            "benchmark",
+        ):
+            if isinstance(node.ctx, ast.Store):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        # Block: torch SDP toggle calls and float32_matmul_precision
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in (
+                "enable_flash_sdp",
+                "enable_mem_efficient_sdp",
+                "enable_math_sdp",
+                "set_float32_matmul_precision",
+            ):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden pattern detected"
+
+        # Block: dynamic code execution (exec, eval, compile, __import__)
+        # These bypass AST-level checks by running arbitrary code at runtime.
+        # torch.compile is safe (ast.Attribute, not ast.Name).
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in ("exec", "eval", "compile", "__import__"):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: {node.func.id}() is forbidden"
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("ctypes", "_ctypes", "gc", "subprocess") or alias.name.startswith(
+                    "importlib"
+                ):
+                    line = getattr(node, "lineno", "?")
+                    return False, f"Line {line}: forbidden import"
+
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module in ("ctypes", "_ctypes", "gc", "subprocess") or node.module.startswith(
+                "importlib"
+            ):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: forbidden import"
+
+        # Block: accessing .optimizer attribute (wrapper bypass attempt)
+        if isinstance(node, ast.Attribute) and node.attr == "optimizer":
+            # Allow 'self.optimizer' inside class definitions, but block
+            # attempts to unwrap the GradientCapturingOptimizer via optimizer.optimizer
+            if not (isinstance(node.value, ast.Name) and node.value.id == "self"):
+                line = getattr(node, "lineno", "?")
+                return False, f"Line {line}: accessing .optimizer attribute is forbidden"
+
+    return True, None
+
+
+_FORBIDDEN_STRINGS = [
+    "__setattr__",
+    "__delattr__",
+    "__class__",
+    "perf_counter",
+    "get_objects",
+    "get_referrers",
+    "get_referents",
+    "enable_flash_sdp",
+    "enable_mem_efficient_sdp",
+    "enable_math_sdp",
+    "set_float32_matmul_precision",
+    "captured_gradients",
+    "_opt_impl",
+    "_grad_snapshot_gpu",
+    "step_count",
+    "GradientCapturingOptimizer",
+    # Dynamic code execution / import bypasses
+    "__import__",
+    "importlib",
+    "import_module",
+]
+
+
+def _is_main_guard(node: ast.AST) -> bool:
+    """Check if an AST node is an `if __name__ == "__main__":` block."""
+    return (
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and node.test.comparators[0].value == "__main__"
+    )
+
+
 def _validate_code_structure(code: str) -> tuple[bool, str | None]:
-    """Validate that train.py has correct structure."""
+    """Validate that train.py has the required structure."""
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
         return False, f"Syntax error at line {exc.lineno}: {exc.msg}"
+
+    # Strip `if __name__ == "__main__":` blocks before security scanning.
+    # These blocks are for local testing only and never execute during
+    # evaluation (the validator imports inner_steps, it doesn't run __main__).
+    scan_tree = ast.Module(
+        body=[node for node in tree.body if not _is_main_guard(node)],
+        type_ignores=tree.type_ignores,
+    )
+
+    safe, danger_error = _scan_for_dangerous_patterns(scan_tree)
+    if not safe:
+        return False, f"Security violation: {danger_error}"
+
+    # Scan string literals for forbidden patterns (also skip __main__ blocks)
+    for node in ast.walk(scan_tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for pattern in _FORBIDDEN_STRINGS:
+                if pattern in node.value:
+                    line = getattr(node, "lineno", "?")
+                    return False, (
+                        f"Security violation: Line {line}: forbidden string pattern detected"
+                    )
 
     inner_steps_found = False
     for node in ast.walk(tree):
@@ -303,21 +550,20 @@ def _load_model(model_path: str, use_random_init: bool = False):
 
     Args:
         model_path: HuggingFace model name/path
-        use_random_init: If True, initialize with random weights (anti-cheat)
+        use_random_init: If True, initialize with random weights
 
     Note:
-        Docker evaluation runs with --network=none for security.
-        Models must be pre-cached in the Docker image. If cache is missing,
-        rebuild the image: docker build --network=host -f environments/templar/Dockerfile -t templar-eval:latest .
+        Docker evaluation runs with --network=none. Models must be
+        pre-cached in the Docker image. If cache is missing, rebuild:
+        docker build --network=host -f environments/templar/Dockerfile -t templar-eval:latest .
     """
     from transformers import AutoConfig, AutoModelForCausalLM
 
     if use_random_init:
-        # Random init - miners can't cheat by freezing pretrained layers
+        # Random initialization
         logger.info(f"Loading model config from {model_path} with RANDOM initialization")
 
-        # Use local cache only - Docker runs with --network=none for security
-        # If this fails, the Docker image needs to be rebuilt with the model cached
+        # Use local cache only (Docker runs with --network=none)
         config = AutoConfig.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -336,7 +582,7 @@ def _load_model(model_path: str, use_random_init: bool = False):
         logger.info(f"Model loaded on {device}")
     else:
         logger.info(f"Loading pretrained model from {model_path}")
-        # Use local cache only - Docker runs with --network=none for security
+        # Use local cache only (Docker runs with --network=none)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -498,10 +744,6 @@ def _verify_params_changed(
 ) -> tuple[bool, str | None, dict]:
     """Verify that minimum % of individual parameter elements changed during training.
 
-    SECURITY: Counts individual elements, not tensors. This prevents a bypass where
-    miners make tiny modifications to many tensors (each barely above threshold) to
-    pass the check without meaningful training.
-
     Args:
         model: Model after training
         initial_state: Model state before training
@@ -589,119 +831,232 @@ def _create_data_iterator(
 
 
 def _create_optimizer(model: torch.nn.Module) -> torch.optim.Optimizer:
-    """Create standard AdamW optimizer."""
+    """Create standard AdamW optimizer (fused on CUDA for performance)."""
+    use_fused = torch.cuda.is_available()
     return torch.optim.AdamW(
         model.parameters(),
         lr=1e-4,
         weight_decay=0.1,
         betas=(0.9, 0.95),
+        fused=use_fused,
     )
 
 
 class GradientCapturingOptimizer:
-    """Optimizer wrapper that captures gradients before each step.
+    """Optimizer wrapper that snapshots gradients on the final step.
 
-    SECURITY: This wrapper intercepts optimizer.step() to capture gradients
-    from within the miner's inner_steps execution. This ensures we verify
-    gradients produced by miner code, not validator code.
+    On the last step, clones gradient tensors on GPU (fast, ~3ms) before
+    optimizer.step() clears them. The slow CPU transfer + norm computation
+    happens AFTER the timer stops via finalize_gradients().
 
-    Protected attributes (optimizer, model, captured_gradients, step_count,
-    gradient_capture_time) cannot be overwritten by miner code - __setattr__
-    raises AttributeError if miner tries to replace them.
+    This keeps the timed section free of validator overhead.
+    Read-only after initialization.
 
-    PERFORMANCE: Tracks overhead time separately and excludes it from wall_time
-    for fair MFU/TPS calculation. MFU formula (6 * params * tokens) only accounts
-    for forward + backward FLOPs, so we exclude:
-    - Gradient capture (validator overhead)
-
+    Security: __getattribute__ blocks access to private internals (_opt_impl,
+    _grad_snapshot_gpu) so miners cannot introspect the wrapper via getattr()
+    or dir(). Internal methods use object.__getattribute__() to bypass the guard.
     """
 
-    # Attributes that miner code must not be able to replace
-    _PROTECTED_ATTRS = frozenset(
+    __slots__ = (
+        "_opt_impl",
+        "model",
+        "captured_gradients",
+        "step_count",
+        "num_steps",
+        "_grad_snapshot_gpu",
+        "_initialized",
+    )
+
+    # Attributes accessible to miner code. Everything else starting with "_"
+    # (except dunder methods) is blocked by __getattribute__.
+    _PUBLIC_ATTRS = frozenset(
         {
-            "optimizer",
-            "model",
+            "step",
+            "zero_grad",
+            "param_groups",
+            "state",
+            "state_dict",
+            "load_state_dict",
+            "add_param_group",
+            "finalize_gradients",
             "captured_gradients",
+            "num_steps",
+            "model",
             "step_count",
-            "gradient_capture_time",
-            "_initialized",
         }
     )
 
-    def __init__(self, optimizer: torch.optim.Optimizer, model: torch.nn.Module):
-        # Use object.__setattr__ during init to bypass our protection
-        object.__setattr__(self, "optimizer", optimizer)
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        model: torch.nn.Module,
+        num_steps: int,
+    ):
+        object.__setattr__(self, "_opt_impl", optimizer)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "captured_gradients", None)
         object.__setattr__(self, "step_count", 0)
-        object.__setattr__(self, "gradient_capture_time", 0.0)
+        object.__setattr__(self, "num_steps", num_steps)
+        object.__setattr__(self, "_grad_snapshot_gpu", None)
         object.__setattr__(self, "_initialized", True)
 
+    def __getattribute__(self, name):
+        """Guard access to private internals.
+
+        Allows: public attrs, dunder methods (__class__, __repr__, etc.),
+        and non-underscore names (forwarded via __getattr__).
+        Blocks: _opt_impl, _grad_snapshot_gpu, _initialized, and any
+        other single-underscore private attr.
+        """
+        # Always allow dunder attrs (Python internals need them)
+        if name.startswith("__") and name.endswith("__"):
+            return object.__getattribute__(self, name)
+        # Allow explicitly public attrs
+        if name in GradientCapturingOptimizer._PUBLIC_ATTRS:
+            return object.__getattribute__(self, name)
+        # Block single-underscore private attrs (_opt_impl, _grad_snapshot_gpu, etc.)
+        if name.startswith("_"):
+            raise AttributeError(f"Access to '{name}' is not allowed on optimizer wrapper")
+        # Non-underscore names not in _PUBLIC_ATTRS: forward via __getattr__
+        return object.__getattribute__(self, name)
+
+    def __dir__(self):
+        """Only expose public API to dir(), hiding internal slots."""
+        return sorted(GradientCapturingOptimizer._PUBLIC_ATTRS)
+
     def __setattr__(self, name, value):
-        """Prevent miner code from replacing security-critical attributes."""
-        # Use CLASS reference (not self) to prevent miner from clearing the set
-        # via optimizer._PROTECTED_ATTRS = frozenset()
-        if (
-            getattr(self, "_initialized", False)
-            and name in GradientCapturingOptimizer._PROTECTED_ATTRS
-        ):
-            raise AttributeError(f"Cannot modify protected attribute '{name}' on optimizer wrapper")
+        try:
+            initialized = object.__getattribute__(self, "_initialized")
+        except AttributeError:
+            initialized = False
+        if initialized:
+            raise AttributeError(
+                f"Cannot modify attribute '{name}' on optimizer wrapper (read-only after init)"
+            )
         object.__setattr__(self, name, value)
 
     def step(self, *args, **kwargs):
-        """Capture gradients BEFORE optimizer.step() clears them."""
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        """On the final step, snapshot gradients on GPU before optimizer.step().
 
-        # Now time ONLY the gradient capture (GPU->CPU copy for verification)
-        # This is validator overhead and should be excluded from wall_time
-        capture_start = time.perf_counter()
-        # Use object.__setattr__ to update protected attrs internally
-        object.__setattr__(self, "captured_gradients", _capture_gradients(self.model))
+        Only clones on the last step (step_count == num_steps - 1).
+        GPU-to-GPU clone is ~3ms for 3B params vs ~7s for GPU→CPU transfer.
+        The slow CPU conversion happens in finalize_gradients() after the timer.
+        """
+        current_step = object.__getattribute__(self, "step_count")
+        object.__setattr__(self, "step_count", current_step + 1)
+
+        # On final step, snapshot gradients on GPU (fast clone, stays on device)
+        if current_step == object.__getattribute__(self, "num_steps") - 1:
+            snapshot = []
+            model = object.__getattribute__(self, "model")
+            for param in model.parameters():
+                if param.grad is not None:
+                    snapshot.append(param.grad.detach().clone())
+                else:
+                    snapshot.append(None)
+            object.__setattr__(self, "_grad_snapshot_gpu", snapshot)
+
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.step(*args, **kwargs)
+
+    def finalize_gradients(self) -> None:
+        """Convert GPU gradient snapshot to GradientInfo (CPU).
+
+        Call AFTER the timer stops. This does the slow GPU→CPU transfer
+        and norm computation outside the timed section.
+        """
+        snapshot = object.__getattribute__(self, "_grad_snapshot_gpu")
+        if snapshot is None:
+            return
+
+        grad_vectors_cpu = []
+        total_norm_sq = 0.0
+        layers_with_grad = 0
+        layers_without_grad = 0
+
+        for grad_gpu in snapshot:
+            if grad_gpu is not None:
+                grad_flat = grad_gpu.cpu().float().view(-1)
+                total_norm_sq += grad_flat.pow(2).sum().item()
+                if grad_flat.abs().sum().item() > 1e-10:
+                    layers_with_grad += 1
+                    grad_vectors_cpu.append(grad_flat)
+                else:
+                    layers_without_grad += 1
+                    grad_vectors_cpu.append(grad_flat)
+            else:
+                layers_without_grad += 1
+                grad_vectors_cpu.append(None)
+
+        grad_norm = total_norm_sq**0.5
+        total_layers = layers_with_grad + layers_without_grad
+        if total_layers > 0:
+            coverage = layers_with_grad / total_layers
+            logger.info(
+                f"Gradient coverage: {layers_with_grad}/{total_layers} layers ({coverage:.1%})"
+            )
+            if layers_without_grad > 0:
+                logger.warning(f"WARNING: {layers_without_grad} layers have zero/no gradients!")
+
         object.__setattr__(
             self,
-            "gradient_capture_time",
-            self.gradient_capture_time + (time.perf_counter() - capture_start),
+            "captured_gradients",
+            GradientInfo(
+                grad_norm=grad_norm,
+                grad_vector=grad_vectors_cpu,
+                layers_with_grad=layers_with_grad,
+                total_layers=total_layers,
+            ),
         )
 
-        # Actual optimizer step (part of miner's training)
-        object.__setattr__(self, "step_count", self.step_count + 1)
-        return self.optimizer.step(*args, **kwargs)
+        # Free GPU snapshot memory
+        object.__setattr__(self, "_grad_snapshot_gpu", None)
 
     def zero_grad(self, set_to_none: bool = False):
         """Forward to underlying optimizer."""
-        return self.optimizer.zero_grad(set_to_none=set_to_none)
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.zero_grad(set_to_none=set_to_none)
 
     @property
     def param_groups(self):
         """Forward param_groups access to underlying optimizer."""
-        return self.optimizer.param_groups
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.param_groups
 
     @param_groups.setter
     def param_groups(self, value):
         """Forward param_groups setter to underlying optimizer."""
-        self.optimizer.param_groups = value
+        opt = object.__getattribute__(self, "_opt_impl")
+        opt.param_groups = value
 
     def state_dict(self):
         """Forward to underlying optimizer."""
-        return self.optimizer.state_dict()
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.state_dict()
 
     def load_state_dict(self, state_dict):
         """Forward to underlying optimizer."""
-        return self.optimizer.load_state_dict(state_dict)
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.load_state_dict(state_dict)
 
     def add_param_group(self, param_group):
         """Forward to underlying optimizer."""
-        return self.optimizer.add_param_group(param_group)
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.add_param_group(param_group)
 
     @property
     def state(self):
         """Forward state access to underlying optimizer."""
-        return self.optimizer.state
+        opt = object.__getattribute__(self, "_opt_impl")
+        return opt.state
 
     def __getattr__(self, name):
-        """Forward any other attribute access to underlying optimizer."""
-        return getattr(self.optimizer, name)
+        """Forward non-private attribute access to underlying optimizer."""
+        # Block private attrs that fell through from __getattribute__ raising
+        if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(f"Access to '{name}' is not allowed on optimizer wrapper")
+        opt = object.__getattribute__(self, "_opt_impl")
+        return getattr(opt, name)
 
 
 def _run_reference(
@@ -718,10 +1073,7 @@ def _run_reference(
         Tuple of (InnerStepsResult, GradientInfo) where GradientInfo
         contains the gradients from the final step (before optimizer.step)
     """
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    _enforce_backend_state()
 
     total_tokens = 0
     final_logits = None
@@ -769,9 +1121,7 @@ def _run_reference(
 def _verify_gradients(
     reference_grad: GradientInfo | None,
     candidate_grad: GradientInfo | None,
-    cosine_min: float = 0.8,  # Legacy, unused - kept for signature compat
-    norm_ratio_min: float = 0.5,  # Legacy, unused - kept for signature compat
-    norm_ratio_max: float = 1.02,  # Relative error threshold: 1.02 = 2% max error
+    norm_ratio_max: float = 1.02,
 ) -> tuple[bool, str | None, dict]:
     """Verify candidate gradients match reference using relative error |g - g_truth| / |g_truth|.
 
@@ -782,20 +1132,15 @@ def _verify_gradients(
     Args:
         reference_grad: Reference implementation gradients
         candidate_grad: Miner's implementation gradients
-        cosine_min: (legacy, kept for signature compat) Not used in new check
-        norm_ratio_min: (legacy, kept for signature compat) Not used in new check
-        norm_ratio_max: Maximum allowed relative error |g - g_truth| / |g_truth|
-            Repurposed: norm_ratio_max is used as the relative error threshold.
-            Production default: 0.01 (1% relative error)
+        norm_ratio_max: Encoded as 1 + max_relative_error. e.g., 1.04 means 4% max error.
+            The relative error threshold is derived as norm_ratio_max - 1.0.
 
     Returns:
         Tuple of (success, error_message, details)
     """
-    # Repurpose norm_ratio_max as the relative error threshold
-    # This keeps backward compat with hparams without adding a new field
-    # norm_ratio_max=1.1 means 10% relative error allowed (old default)
-    # norm_ratio_max=1.01 means 1% relative error allowed (tight)
-    relative_error_threshold = norm_ratio_max - 1.0  # e.g., 1.01 -> 0.01
+    # Derive relative error threshold from norm_ratio_max
+    # e.g., 1.04 -> 0.04 (4% relative error allowed)
+    relative_error_threshold = norm_ratio_max - 1.0
 
     details = {
         "relative_error_threshold": relative_error_threshold,
@@ -818,7 +1163,7 @@ def _verify_gradients(
     details["candidate_layers_with_grad"] = candidate_grad.layers_with_grad
     details["candidate_total_layers"] = candidate_grad.total_layers
 
-    # Check 0: All layers must have gradients (catches "restore weights" attack)
+    # Check 0: All layers must have gradients
     if candidate_grad.total_layers > 0:
         grad_coverage = candidate_grad.layers_with_grad / candidate_grad.total_layers
         details["gradient_coverage"] = grad_coverage
@@ -840,8 +1185,7 @@ def _verify_gradients(
         logger.info("[PASSED] All layers have gradients")
 
     # Check 1: Relative gradient error |g - g_truth| / |g_truth|
-    # This single check replaces both norm ratio and cosine similarity.
-    # It catches ALL deviations: truncation, layer freezing, step skipping, etc.
+    # Catches ALL deviations: truncation, layer freezing, step skipping, etc.
     ref_vecs = reference_grad.grad_vector
     cand_vecs = candidate_grad.grad_vector
 
@@ -897,7 +1241,7 @@ def _verify_gradients(
                 f"{relative_error_threshold:.6f} (|g - g_truth| / |g_truth|)"
             )
             details["checks_failed"].append({"check": "gradient_relative_error", "error": error})
-            details["error_code"] = "gradient_norm_ratio_failed"
+            details["error_code"] = "gradient_relative_error_failed"
             logger.error(f"[FAILED] {error}")
             return False, error, details
         details["checks_passed"].append("gradient_relative_error")
@@ -913,23 +1257,122 @@ def _verify_gradients(
     return True, None, details
 
 
+def _verify_final_weights(
+    model: torch.nn.Module,
+    reference_final_state: dict,
+    max_relative_error: float = 0.05,
+) -> tuple[bool, str | None, dict]:
+    """Verify miner's final model weights match reference after full training.
+
+    Compares miner final weights against reference to verify the entire
+    training pipeline end-to-end. Computed layer-by-layer on CPU to avoid
+    GPU memory pressure.
+
+    Args:
+        model: Model after miner's training (post optimizer steps)
+        reference_final_state: Model state dict after reference training
+        max_relative_error: Maximum allowed |w_miner - w_ref| / |w_ref|
+
+    Returns:
+        Tuple of (success, error_message, details)
+    """
+    details: dict = {
+        "relative_error_threshold": max_relative_error,
+        "checks_passed": [],
+        "checks_failed": [],
+    }
+
+    logger.info("=" * 60)
+    logger.info("VERIFICATION: Final model weight comparison")
+    logger.info("=" * 60)
+
+    # Compute relative error layer-by-layer (memory efficient)
+    diff_norm_sq = 0.0
+    ref_norm_sq = 0.0
+    total_elements = 0
+    mismatched_layers = 0
+
+    for name, param in model.named_parameters():
+        if name not in reference_final_state:
+            continue
+
+        # Move reference to same device for comparison, then back to CPU
+        ref_param = reference_final_state[name].to(param.device)
+        diff = param.data.float() - ref_param.float()
+
+        layer_diff_sq = (diff * diff).sum().item()
+        layer_ref_sq = (ref_param.float() * ref_param.float()).sum().item()
+
+        diff_norm_sq += layer_diff_sq
+        ref_norm_sq += layer_ref_sq
+        total_elements += param.numel()
+
+        # Track layers with significant differences
+        if layer_ref_sq > 0:
+            layer_rel_error = (layer_diff_sq**0.5) / (layer_ref_sq**0.5)
+            if layer_rel_error > max_relative_error:
+                mismatched_layers += 1
+
+    ref_norm = ref_norm_sq**0.5
+    diff_norm = diff_norm_sq**0.5
+
+    if ref_norm > 0:
+        relative_error = diff_norm / ref_norm
+    else:
+        relative_error = 0.0 if diff_norm == 0 else float("inf")
+
+    details["relative_error"] = relative_error
+    details["diff_norm"] = diff_norm
+    details["ref_norm"] = ref_norm
+    details["total_elements"] = total_elements
+    details["mismatched_layers"] = mismatched_layers
+
+    logger.info(f"[CHECK] Weight relative error: {relative_error:.6f}")
+    logger.info(f"   |w_miner - w_ref|: {diff_norm:.6f}")
+    logger.info(f"   |w_ref|: {ref_norm:.6f}")
+    logger.info(f"   Max allowed: {max_relative_error:.6f}")
+    logger.info(f"   Total elements: {total_elements:,}")
+    logger.info(f"   Mismatched layers: {mismatched_layers}")
+
+    if relative_error > max_relative_error:
+        error = (
+            f"Final weight relative error {relative_error:.6f} exceeds threshold "
+            f"{max_relative_error:.6f} (|w_miner - w_ref| / |w_ref|)"
+        )
+        details["checks_failed"].append({"check": "weight_relative_error", "error": error})
+        details["error_code"] = "weight_mismatch"
+        logger.error(f"[FAILED] {error}")
+        return False, error, details
+
+    details["checks_passed"].append("weight_relative_error")
+    logger.info("[PASSED] Final model weights match reference")
+
+    logger.info("=" * 60)
+    logger.info("VERIFICATION: WEIGHT CHECK PASSED")
+    logger.info("=" * 60)
+
+    return True, None, details
+
+
 def _verify_outputs(
     reference: InnerStepsResult,
     candidate: InnerStepsResult,
     expected_tokens: int,
     reference_grad: GradientInfo | None = None,
     candidate_grad: GradientInfo | None = None,
+    reference_final_state: dict | None = None,
+    model: torch.nn.Module | None = None,
     max_loss_difference: float = 0.5,
-    gradient_cosine_min: float = 0.8,
-    gradient_norm_ratio_min: float = 0.5,
     gradient_norm_ratio_max: float = 1.02,
+    weight_relative_error_max: float = 0.05,
 ) -> tuple[bool, str | None, dict]:
     """Verify candidate outputs match reference.
 
     Verification checks:
     1. Token count matches expected
     2. Loss is valid and similar to reference (small difference)
-    3. Gradient-based verification (replaces logits comparison)
+    3. Gradient-based verification (captures backward pass correctness)
+    4. Final weight verification (captures optimizer step correctness)
 
     Args:
         reference: Reference implementation results
@@ -937,10 +1380,11 @@ def _verify_outputs(
         expected_tokens: Expected token count
         reference_grad: Reference gradients for comparison
         candidate_grad: Candidate gradients for comparison
+        reference_final_state: Reference model state after full training
+        model: Model after miner's training (for weight comparison)
         max_loss_difference: Maximum allowed |candidate_loss - reference_loss|
-        gradient_cosine_min: Minimum gradient cosine similarity
-        gradient_norm_ratio_min: Min gradient norm ratio
-        gradient_norm_ratio_max: Max gradient norm ratio
+        gradient_norm_ratio_max: Encoded as 1 + max_relative_error for gradient check
+        weight_relative_error_max: Max relative error for final weight comparison
 
     Returns:
         Tuple of (success, error_message, verification_details)
@@ -960,7 +1404,7 @@ def _verify_outputs(
 
     # 1. Verify token count matches expected
     logger.info(
-        f"[CHECK 1/3] Token count: expected={expected_tokens}, got={candidate.total_tokens}"
+        f"[CHECK 1/4] Token count: expected={expected_tokens}, got={candidate.total_tokens}"
     )
     if candidate.total_tokens != expected_tokens:
         error = f"Token count mismatch: expected {expected_tokens}, got {candidate.total_tokens}"
@@ -971,7 +1415,7 @@ def _verify_outputs(
     logger.info("[PASSED] Token count matches")
 
     # 2. Verify loss is reasonable and similar to reference
-    logger.info(f"[CHECK 2/3] Loss validity: candidate_loss={candidate.final_loss:.6f}")
+    logger.info(f"[CHECK 2/4] Loss validity: candidate_loss={candidate.final_loss:.6f}")
     if candidate.final_loss != candidate.final_loss:  # NaN check
         error = "Loss is NaN"
         details["checks_failed"].append({"check": "loss_validity", "error": error})
@@ -1014,13 +1458,11 @@ def _verify_outputs(
     details["checks_passed"].append("loss_validity")
     logger.info("[PASSED] Loss is valid and similar to reference")
 
-    # 3. Gradient-based verification (replaces logits comparison)
-    logger.info("[CHECK 3/3] Gradient verification")
+    # 3. Gradient-based verification (captures backward pass correctness)
+    logger.info("[CHECK 3/4] Gradient verification")
     grad_ok, grad_error, grad_details = _verify_gradients(
         reference_grad,
         candidate_grad,
-        cosine_min=gradient_cosine_min,
-        norm_ratio_min=gradient_norm_ratio_min,
         norm_ratio_max=gradient_norm_ratio_max,
     )
     details["gradient_verification"] = grad_details
@@ -1029,6 +1471,23 @@ def _verify_outputs(
         details["checks_failed"].append({"check": "gradient_verification", "error": grad_error})
         return False, grad_error, details
     details["checks_passed"].append("gradient_verification")
+
+    # 4. Final weight verification (verifies optimizer step correctness)
+    if reference_final_state is not None and model is not None:
+        logger.info("[CHECK 4/4] Final weight verification")
+        weight_ok, weight_error, weight_details = _verify_final_weights(
+            model,
+            reference_final_state,
+            max_relative_error=weight_relative_error_max,
+        )
+        details["weight_verification"] = weight_details
+
+        if not weight_ok:
+            details["checks_failed"].append({"check": "weight_verification", "error": weight_error})
+            return False, weight_error, details
+        details["checks_passed"].append("weight_verification")
+    else:
+        logger.warning("Skipping weight verification (no reference state available)")
 
     logger.info("=" * 60)
     logger.info("VERIFICATION: ALL CHECKS PASSED")
@@ -1062,10 +1521,10 @@ class Actor:
         use_random_init: bool = True,
         min_trainable_params_ratio: float = 1.0,
         min_params_changed_ratio: float = 0.5,
-        # Gradient verification (replaces logits)
-        gradient_cosine_min: float = 0.8,
-        gradient_norm_ratio_min: float = 0.5,
+        # Gradient verification
         gradient_norm_ratio_max: float = 1.02,
+        # Weight verification
+        weight_relative_error_max: float = 0.04,
         # MFU calculation
         gpu_peak_tflops: float = 312.0,
         model_params_override: int | None = None,
@@ -1085,12 +1544,11 @@ class Actor:
             data_samples: Number of data samples
             code: Miner's train.py code (passed directly from validator)
             max_loss_difference: Max allowed |candidate_loss - reference_loss|
-            use_random_init: Use random weights (anti-cheat)
+            use_random_init: Use random weights
             min_trainable_params_ratio: Min % params that must be trainable
             min_params_changed_ratio: Min % params that must change
-            gradient_cosine_min: Min gradient cosine similarity
-            gradient_norm_ratio_min: Min gradient norm ratio
-            gradient_norm_ratio_max: Max gradient norm ratio
+            gradient_norm_ratio_max: Encoded as 1 + max_relative_error (e.g., 1.04 = 4%)
+            weight_relative_error_max: Max relative error for final weight check (e.g., 0.04 = 4%)
             gpu_peak_tflops: GPU peak TFLOPS for MFU calculation
             model_params_override: Override model param count (None = auto-detect)
 
@@ -1188,7 +1646,8 @@ class Actor:
                     "code": code,
                 }
 
-            # Load model and data (with random init if enabled for anti-cheat)
+            # Load model and data
+            _log_vram("before-model-load")
             model = _get_cached_model(model_url, use_random_init=use_random_init)
             model_params = model_params_override or _count_model_params(model)
             logger.info(f"Model loaded: {model_params:,} parameters, random_init={use_random_init}")
@@ -1216,6 +1675,20 @@ class Actor:
             reference, reference_grad = _run_reference(
                 model, data_iter_ref, optimizer_ref, steps, device, capture_final_gradients=True
             )
+
+            # Capture reference final weights for verification
+            reference_final_state = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            logger.info("Captured reference final model state for weight verification")
+            _log_vram("after-reference-run")
+
+            # Free reference optimizer VRAM before running miner code
+            del optimizer_ref
+            del data_iter_ref
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # Reset model for miner's code
             model.load_state_dict(initial_state)
@@ -1327,28 +1800,28 @@ class Actor:
                     "code": code,
                 }
 
-            # Reset model state after warmup
+            # Reset model state after warmup and free warmup optimizer VRAM
             model.load_state_dict(initial_state)
+            del optimizer_warmup
+            del data_iter_warmup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-            # =================================================================
-            # FULL EVALUATION - Run actual timed evaluation with gradient capture
-            # =================================================================
-            # SECURITY: Use GradientCapturingOptimizer to capture gradients from
-            # WITHIN the miner's inner_steps execution. This ensures we verify
-            # gradients produced by miner code, not validator code.
-            #
-            # Previous approach (running final step manually) was flawed because
-            # when steps==1, miner's inner_steps was never called during evaluation.
+            # Full timed evaluation with gradient capture
+            _log_vram("before-timed-eval")
             data_iter_miner = _create_data_iterator(data, batch_size, seq_len)
             base_optimizer = _create_optimizer(model)
-            optimizer_miner = GradientCapturingOptimizer(base_optimizer, model)
+            optimizer_miner = GradientCapturingOptimizer(base_optimizer, model, num_steps=steps)
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            # Enforce backend settings to match reference run.
+            # Miner warmup may have changed these for a speed boost;
+            # reset them so the timed eval uses the same settings as reference.
+            _enforce_backend_state()
 
-            start = time.perf_counter()
+            _cuda_synchronize()
+            start = _perf_counter()
 
-            # Run ALL steps through miner's inner_steps
             miner_result = miner_module.inner_steps(
                 model=model,
                 data_iterator=data_iter_miner,
@@ -1357,20 +1830,44 @@ class Actor:
                 device=device,
             )
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            _cuda_synchronize()
+            wall_time = _perf_counter() - start
+            logger.info(f"Timing: wall_time={wall_time:.2f}s (used for MFU/TPS)")
 
-            total_time = time.perf_counter() - start
+            # Convert GPU gradient snapshot to CPU (slow, but OUTSIDE the timer)
+            optimizer_miner.finalize_gradients()
 
-            # Exclude gradient capture time from wall_time for fair MFU calculation
-            # Gradient capture is validator overhead (copies gradients GPU->CPU for verification)
-            # optimizer.step() and zero_grad() ARE part of miner's training, included in wall_time
-            gradient_capture_time = optimizer_miner.gradient_capture_time
-            wall_time = total_time - gradient_capture_time
-            logger.info(
-                f"Timing: total={total_time:.2f}s, grad_capture={gradient_capture_time:.2f}s, "
-                f"wall_time={wall_time:.2f}s (used for MFU/TPS)"
-            )
+            # Verify backend settings were not tampered with during timed eval
+            _backend_violations = _check_backend_state()
+            if _backend_violations:
+                logger.warning(f"Backend settings changed during eval: {_backend_violations}")
+                return {
+                    "task_id": task_id,
+                    "mfu": 0.0,
+                    "tps": 0.0,
+                    "total_tokens": 0,
+                    "wall_time_seconds": wall_time,
+                    "success": False,
+                    "error": "forbidden pattern detected",
+                    "error_code": "execution_failed",
+                    "seed": seed,
+                    "code": code,
+                }
+
+            # Verify optimizer wrapper integrity
+            if type(optimizer_miner) is not GradientCapturingOptimizer:
+                return {
+                    "task_id": task_id,
+                    "mfu": 0.0,
+                    "tps": 0.0,
+                    "total_tokens": 0,
+                    "wall_time_seconds": wall_time,
+                    "success": False,
+                    "error": "Optimizer integrity check failed",
+                    "error_code": "execution_failed",
+                    "seed": seed,
+                    "code": code,
+                }
 
             # Get gradients captured from the final step (inside miner's code)
             candidate_grad = optimizer_miner.captured_gradients
@@ -1404,15 +1901,9 @@ class Actor:
                     "code": code,
                 }
 
-            # =================================================================
-            # SEQUENCE LENGTH CHECK - Detect truncation cheating
-            # =================================================================
-            # SECURITY: Miners may truncate sequences to process fewer tokens
-            # while reporting full token count. Check logits sequence dimension.
-            # Expected: seq_len - 1 (causal LM uses batch[:, :-1] as input)
-            expected_seq_len = seq_len - 1
+            # Sequence length verification
+            expected_seq_len = seq_len - 1  # causal LM uses batch[:, :-1] as input
 
-            # SECURITY: Require final_logits to be present (prevent None bypass)
             if parsed.final_logits is None:
                 return {
                     "task_id": task_id,
@@ -1427,7 +1918,7 @@ class Actor:
                     "code": code,
                 }
 
-            # SECURITY: Verify logits is 3D tensor (batch, seq, vocab)
+            # Verify logits shape is 3D (batch, seq, vocab)
             if len(parsed.final_logits.shape) != 3:
                 return {
                     "task_id": task_id,
@@ -1444,7 +1935,7 @@ class Actor:
 
             logits_seq_len = parsed.final_logits.shape[1]
 
-            # SECURITY: Verify sequence length - miner can't truncate sequences
+            # Verify sequence length matches expected
             if logits_seq_len != expected_seq_len:
                 return {
                     "task_id": task_id,
@@ -1460,12 +1951,7 @@ class Actor:
                 }
             logger.info(f"[PASSED] Sequence length check: {logits_seq_len} == {expected_seq_len}")
 
-            # =================================================================
-            # PARAMS CHANGED CHECK - Verify miner actually trained the model
-            # =================================================================
-            # SECURITY: This catches the "freeze layers then restore requires_grad" attack.
-            # Even if a miner restores requires_grad=True after their inner_steps,
-            # the frozen layers wouldn't have changed during training, so this check fails.
+            # Verify sufficient parameters changed during training
             params_ok, params_error, params_details = _verify_params_changed(
                 model, initial_state, min_params_changed_ratio
             )
@@ -1487,21 +1973,21 @@ class Actor:
             # Calculate expected tokens
             expected_tokens = batch_size * seq_len * steps
 
-            # Verify outputs using gradient-based verification
+            # Verify outputs using gradient-based AND weight-based verification
             verified, verify_error, verify_details = _verify_outputs(
                 reference,
                 parsed,
                 expected_tokens,
                 reference_grad=reference_grad,
                 candidate_grad=candidate_grad,
+                reference_final_state=reference_final_state,
+                model=model,
                 max_loss_difference=max_loss_difference,
-                gradient_cosine_min=gradient_cosine_min,
-                gradient_norm_ratio_min=gradient_norm_ratio_min,
                 gradient_norm_ratio_max=gradient_norm_ratio_max,
+                weight_relative_error_max=weight_relative_error_max,
             )
 
-            # This ensures miner can't inflate MFU by reporting higher token counts
-            total_tokens_int = expected_tokens  # Validator knows exact expected count
+            total_tokens_int = expected_tokens  # Use validator-computed token count
             tps = float(total_tokens_int) / max(wall_time, 1e-6)
             mfu = _calculate_mfu(total_tokens_int, wall_time, model_params, gpu_peak_tflops)
 
@@ -1524,6 +2010,10 @@ class Actor:
                 # Check gradient_verification sub-details
                 grad_details = verify_details.get("gradient_verification", {})
                 error_code = grad_details.get("error_code")
+                # Check weight_verification sub-details
+                if not error_code:
+                    weight_details = verify_details.get("weight_verification", {})
+                    error_code = weight_details.get("error_code")
                 # Check other verification failures
                 if not error_code:
                     for check in verify_details.get("checks_failed", []):
@@ -1531,6 +2021,8 @@ class Actor:
                             error_code = "token_count_mismatch"
                         elif check.get("check") == "loss_comparison":
                             error_code = "loss_mismatch"
+                        elif check.get("check") == "weight_verification":
+                            error_code = "weight_mismatch"
 
             return {
                 "task_id": task_id,
@@ -1560,13 +2052,31 @@ class Actor:
             }
 
         finally:
-            # SECURITY: Reset torch state to prevent cross-evaluation contamination
+            # Free model gradients to release VRAM held by .grad tensors
+            try:
+                model.zero_grad(set_to_none=True)
+            except Exception:
+                pass
+
+            # Explicitly delete large objects to free VRAM/RAM before GC.
+            # Without this, local references keep optimizer states (~2x model
+            # VRAM), data tensors, gradient copies, and reference state alive,
+            # preventing gc.collect() + empty_cache() from reclaiming memory.
+            # noinspection PyUnusedLocal
+            optimizer_miner = base_optimizer = None  # type: ignore[assignment]
+            data_iter_miner = data = None  # type: ignore[assignment]
+            reference_final_state = candidate_grad = None  # type: ignore[assignment]
+            miner_result = parsed = miner_module = None  # type: ignore[assignment]
+            reference = reference_grad = None  # type: ignore[assignment]
+
+            # Reset torch state (clears compile caches, removes miner module)
             _reset_torch_state()
 
             # Memory cleanup
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            _log_vram("after-cleanup")
 
 
 # =============================================================================
@@ -1606,9 +2116,9 @@ class EvaluateRequest(BaseModel):
     min_trainable_params_ratio: float = 1.0
     min_params_changed_ratio: float = 0.5
     # Gradient verification
-    gradient_cosine_min: float = 0.8
-    gradient_norm_ratio_min: float = 0.5
     gradient_norm_ratio_max: float = 1.02
+    # Weight verification
+    weight_relative_error_max: float = 0.04
     # MFU calculation
     gpu_peak_tflops: float = 312.0
 
@@ -1661,9 +2171,8 @@ async def evaluate(request: EvaluateRequest) -> EvaluateResponse:
         use_random_init=request.use_random_init,
         min_trainable_params_ratio=request.min_trainable_params_ratio,
         min_params_changed_ratio=request.min_params_changed_ratio,
-        gradient_cosine_min=request.gradient_cosine_min,
-        gradient_norm_ratio_min=request.gradient_norm_ratio_min,
         gradient_norm_ratio_max=request.gradient_norm_ratio_max,
+        weight_relative_error_max=request.weight_relative_error_max,
         gpu_peak_tflops=request.gpu_peak_tflops,
     )
 

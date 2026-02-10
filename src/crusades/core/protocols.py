@@ -12,13 +12,13 @@ from typing import Any, Protocol, runtime_checkable
 class SubmissionStatus(StrEnum):
     """Status of a code submission."""
 
-    # In-progress statuses (hidden from dashboard for security)
+    # In-progress statuses
     PENDING = "pending"  # Just submitted, awaiting validation
     VALIDATING = "validating"  # Being validated (syntax, imports, functions)
     EVALUATING = "evaluating"  # Passed validation, being evaluated in sandbox
 
     # Final statuses (shown in recent submissions)
-    FINISHED = "finished"  #  Evaluation complete, has final TPS score
+    FINISHED = "finished"  # Evaluation complete, has final MFU score
     FAILED_VALIDATION = (
         "failed_validation"  #  Code validation failed (syntax, imports, missing function)
     )

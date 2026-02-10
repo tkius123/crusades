@@ -96,9 +96,7 @@ class BaseNode(ABC):
 
         # Initial sync
         # Skip blockchain checks if in test mode
-        skip_check = getattr(self, "skip_blockchain_check", False)
-
-        if not skip_check:
+        if not self.skip_blockchain_check:
             await self.sync()
 
             if self.uid is None:
@@ -108,7 +106,6 @@ class BaseNode(ABC):
             logger.info(f"UID: {self.uid}")
         else:
             logger.warning("Skipping blockchain registration check (test mode)")
-            logger.info(f"Hotkey: {self.hotkey}")
 
         self.running = True
 
