@@ -1,10 +1,11 @@
 {
   "checked_submission_ids": [
-    "v3_commit_7500551_204",
+    "v3_commit_7500996_161",
+    "v3_commit_7509610_241",
+    "v3_commit_7500655_191",
     "v3_commit_7501050_79",
     "v3_commit_7505428_42",
-    "v3_commit_7500655_191",
-    "v3_commit_7500996_161"
+    "v3_commit_7500551_204"
   ],
   "results": {
     "v3_commit_7501050_79": {
@@ -46,6 +47,14 @@
       "reason": "Conservative, clean optimization using torch.compile and CUDA stream prefetch with deterministic settings matching the reference, properly using the provided optimizer on every step with no gaming patterns.",
       "full_reply": "(batch reply, see log)",
       "checked_at": "2026-02-09T21:30:41.551186"
+    },
+    "v3_commit_7509610_241": {
+      "submission_id": "v3_commit_7509610_241",
+      "rank": 2,
+      "verdict": "NO",
+      "reason": "The code implements a legitimate training loop with standard PyTorch performance optimizations (torch.compile, CUDA stream prefetching, TF32/bf16 autocast, fused optimizer, GC suppression, flash SDP) \u2014 it does not hardcode outputs, truncate sequences, freeze layers, bypass real training, leak eval info, or return None for final_logits.",
+      "full_reply": "SUBMISSION: miner-code-optimization-9757\nVERDICT: NO\nREASON: The code implements a legitimate training loop with standard PyTorch performance optimizations (torch.compile, CUDA stream prefetching, TF32/bf16 autocast, fused optimizer, GC suppression, flash SDP) \u2014 it does not hardcode outputs, truncate sequences, freeze layers, bypass real training, leak eval info, or return None for final_logits.",
+      "checked_at": "2026-02-10T00:09:07.794619"
     }
   }
 }

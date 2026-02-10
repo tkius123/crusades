@@ -199,36 +199,35 @@ def _fetch_file_from_branch(client: httpx.Client, repo_url: str, branch: str, fi
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def get_previous_result_section(output_dir: Path) -> str:
-    """Find the most recent submission with an eval result and include it in the prompt."""
+def _find_latest_evaluated(output_dir: Path) -> dict | None:
+    """Walk submissions.json backwards to find the most recent entry with an eval result."""
     submissions_path = output_dir / "submissions.json"
     if not submissions_path.exists():
-        return ""
+        return None
     try:
         submissions = json.loads(submissions_path.read_text())
     except (json.JSONDecodeError, OSError):
-        return ""
-    if not submissions:
-        return ""
-
-    # Find the most recent entry that has an actual eval result (finished or failed_*)
-    evaluated = None
+        return None
     for entry in reversed(submissions):
-        s = entry.get("status", "")
-        if s and (s == "finished" or "failed" in s.lower()):
-            evaluated = entry
-            break
+        status = entry.get("status", "")
+        if status and status not in ("submitted", "unknown", ""):
+            return entry
+    return None
 
-    if not evaluated:
+
+def get_previous_result_section(output_dir: Path) -> str:
+    """Navigate backwards through submissions to find the most recent one with an eval result."""
+    entry = _find_latest_evaluated(output_dir)
+    if entry is None:
         return ""
 
-    status = evaluated.get("status", "")
-    mfu = evaluated.get("mfu")
-    code_file = evaluated.get("code_file", "")
-    error = evaluated.get("error", "")
-    uid = evaluated.get("uid", "?")
+    status = entry.get("status", "")
+    uid = entry.get("uid", "?")
+    mfu = entry.get("mfu")
+    code_file = entry.get("code_file", "")
+    error = entry.get("error", "")
 
-    lines = [f"IMPORTANT — Most recent evaluated submission (UID {uid}):"]
+    lines = [f"IMPORTANT — Your most recent evaluated submission (UID {uid}):"]
     lines.append(f"  Status: {status}")
     if mfu is not None:
         lines.append(f"  MFU: {mfu}")
@@ -263,19 +262,11 @@ def get_previous_result_section(output_dir: Path) -> str:
 
 
 def _get_latest_eval_sid(output_dir: Path) -> str | None:
-    """Get submission_id of the most recent evaluated entry in submissions.json."""
-    submissions_path = output_dir / "submissions.json"
-    if not submissions_path.exists():
+    """Get identifier of the most recent submission with an eval result (walks backwards)."""
+    entry = _find_latest_evaluated(output_dir)
+    if entry is None:
         return None
-    try:
-        submissions = json.loads(submissions_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    for entry in reversed(submissions):
-        s = entry.get("status", "")
-        if s and (s == "finished" or "failed" in s.lower()):
-            return entry.get("submission_id") or entry.get("code_file")
-    return None
+    return entry.get("submission_id") or entry.get("code_file")
 
 
 def _load_last_gen_inputs(output_dir: Path) -> dict | None:
