@@ -53,6 +53,7 @@ import httpx
 
 CURSOR_API_BASE = "https://api.cursor.com/v0"
 DEFAULT_MODEL = "claude-4.6-opus-high-thinking"
+COPYCAT_MODEL = "claude-3-5-haiku"  # cheap model for copycat (rename-only); minor/major use default
 DEFAULT_INTERVAL_SEC = 3600  # 1 hour
 WALLET_COOLDOWN_SEC = 4320  # 1.2 hours = 72 minutes
 AGENT_POLL_INTERVAL = 5
@@ -839,6 +840,9 @@ def run_improve(
 
     current_inputs = {"top_sid": top_sid, "policy": policy}
 
+    # Copycat uses a cheap model; minor/major use default (or --model)
+    effective_model = COPYCAT_MODEL if policy == "copycat" else (model or DEFAULT_MODEL)
+
     prompt = IMPROVE_PROMPT.format(
         strategy_section=strategy_section,
         applied_changes_section=applied_changes_section,
@@ -847,8 +851,8 @@ def run_improve(
         code_style_section=code_style_section,
     )
 
-    log(f"Launching Cursor agent to generate improved train.py (model={model or 'auto'})...", log_path)
-    reply = call_cursor_agent(api_key, repo, prompt, model=model)
+    log(f"Launching Cursor agent to generate improved train.py (model={effective_model})...", log_path)
+    reply = call_cursor_agent(api_key, repo, prompt, model=effective_model)
     if reply is None:
         log("Cursor agent error (FAILED/TIMEOUT).", log_path)
         return 1
